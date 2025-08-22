@@ -1,140 +1,114 @@
 # utils/match_utils.py
 
 import re
-from datetime import datetime
 from typing import Any, Dict, Optional
+from datetime import datetime
+from dateutil import parser, tz
+from rapidfuzz import process
 
-# -----------------------------
-# Team Name Normalization
-# -----------------------------
+# Import the new structured Market system
+from core.markets import normalize_market_name, Market
+
+# ================================================================
+# TEAM NAME NORMALIZATION
+# ================================================================
+TEAM_ALIASES = {
+    "man utd": "Manchester United",
+    "man united": "Manchester United",
+    "man city": "Manchester City",
+    "bayern": "Bayern Munich",
+    "psg": "Paris Saint-Germain",
+    "inter": "Inter Milan",
+    "spurs": "Tottenham Hotspur",
+}
+
 def normalize_team_name(name: str) -> str:
-    """
-    Normalize team names by removing extra spaces, 
-    common suffixes, and unifying capitalization.
-    """
     if not name:
         return ""
-    name = name.strip().lower()
+    raw_name = name.strip().lower()
+    raw_name = re.sub(r"\b(fc|cf|sc|afc|cfc)$", "", raw_name).strip()
+    
+    # Direct alias match
+    if raw_name in TEAM_ALIASES:
+        return TEAM_ALIASES[raw_name]
 
-    # Remove "fc", "cf", "sc" at end
-    name = re.sub(r"\b(fc|cf|sc|afc|cfc)$", "", name)
-
-    # Collapse multiple spaces
-    name = re.sub(r"\s+", " ", name)
-
-    return name.strip().title()
-
-
-# -----------------------------
-# Market Name Normalization
-# -----------------------------
-def normalize_market(market: str) -> str:
-    """
-    Normalize bookmaker market names to standard ones.
-    E.g. '1X2', 'Match Odds', 'Full Time Result' -> '1x2'
-    """
-    if not market:
-        return ""
-
-    mapping = {
-        "1x2": "1x2",
-        "match odds": "1x2",
-        "full time result": "1x2",
-        "ou": "over_under",
-        "over/under": "over_under",
-        "totals": "over_under",
-        "handicap": "handicap",
-        "asian handicap": "handicap",
-    }
-
-    key = market.strip().lower()
-    return mapping.get(key, key)
+    # Fuzzy match
+    result = process.extractOne(raw_name, TEAM_ALIASES.keys(), score_cutoff=85)
+    if result:
+        match, score, _ = result
+        return TEAM_ALIASES.get(match, raw_name.title())
+    
+    # Fallback
+    return raw_name.title()
 
 
-# -----------------------------
-# Odds Normalization
-# -----------------------------
+# ================================================================
+# ODDS NORMALIZATION
+# ================================================================
 def normalize_odds(value: Any) -> Optional[float]:
-    """
-    Convert odds into float decimals.
-    Accepts strings like '2.5', '2/1', or numbers.
-    Returns None if invalid.
-    """
     if value is None:
         return None
-
     if isinstance(value, (int, float)):
         return float(value)
-
     val = str(value).strip()
-
-    # Handle fractional odds like '2/1'
     if "/" in val:
         try:
             num, den = val.split("/")
             return round(float(num) / float(den) + 1, 2)
         except (ValueError, ZeroDivisionError):
             return None
-
     try:
         return float(val)
     except ValueError:
         return None
 
+def normalize_odds_keys(odds: dict) -> dict:
+    mapping = {
+        "home": "1", "draw": "X", "away": "2",
+        "team a": "1", "team b": "2",
+        "yes": "Yes", "no": "No",
+    }
+    return {
+        mapping.get(k.strip().lower(), k.strip()): normalize_odds(v)
+        for k, v in odds.items()
+    }
 
-# -----------------------------
-# Match Dictionary Builder
-# -----------------------------
-def build_match_dict(
-    home_team: str,
-    away_team: str,
-    start_time: str,
-    market: str,
-    odds: Dict[str, Any],
-    bookmaker: str,
-) -> Dict[str, Any]:
-    """
-    Build a clean, normalized match dictionary for storage or arbitrage.
-    """
+
+# ================================================================
+# MATCH BUILDER
+# ================================================================
+def build_match_dict(home_team: str, away_team: str, start_time: str,
+                     market: str, odds: Dict[str, Any], bookmaker: str) -> Dict[str, Any]:
+    normalized_market: Optional[Market] = normalize_market_name(market)
 
     return {
         "home_team": normalize_team_name(home_team),
         "away_team": normalize_team_name(away_team),
         "start_time": parse_datetime(start_time),
-        "market": normalize_market(market),
-        "odds": {
-            outcome: normalize_odds(odd) for outcome, odd in odds.items()
-        },
+        "market": normalized_market.name if normalized_market else market,   # fallback to raw
+        "market_obj": normalized_market,  # keep the full Market object for advanced use
+        "odds": normalize_odds_keys(odds),
         "bookmaker": bookmaker,
     }
 
 
-# -----------------------------
-# Date Parsing
-# -----------------------------
+# ================================================================
+# DATETIME PARSER
+# ================================================================
 def parse_datetime(dt_str: str) -> Optional[str]:
-    """
-    Parse datetime strings into ISO format (UTC).
-    Accepts multiple common formats.
-    """
     if not dt_str:
         return None
+    try:
+        dt = parser.parse(dt_str)
+        if not dt.tzinfo:
+            dt = dt.replace(tzinfo=tz.UTC)
+        return dt.astimezone(tz.UTC).isoformat()
+    except Exception:
+        return None
 
-    dt_str = dt_str.strip()
-    formats = [
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%d %H:%M",
-        "%d/%m/%Y %H:%M",
-        "%d-%m-%Y %H:%M",
-        "%Y/%m/%d %H:%M",
-        "%Y-%m-%dT%H:%M:%SZ",  # ISO8601 UTC
-    ]
 
-    for fmt in formats:
-        try:
-            dt = datetime.strptime(dt_str, fmt)
-            return dt.isoformat()
-        except ValueError:
-            continue
-
-    return None
+# ================================================================
+# UTILS
+# ================================================================
+def truncate_label(label: str, max_len: int = 50) -> str:
+    return label if len(label) <= max_len else label[:47] + "..."
