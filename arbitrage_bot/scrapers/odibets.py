@@ -1,6 +1,6 @@
-# scrapers/odibets_scraper.py
+# scrapers/odibets.py
 
-from utils.match_utils import normalize_match_name, generate_match_id
+from utils.match_utils import build_match_dict
 
 def get_odds():
     raw_matches = [
@@ -26,11 +26,27 @@ def get_odds():
 
     normalized_matches = []
     for m in raw_matches:
-        normalized_name = normalize_match_name(m["match"])
-        normalized_matches.append({
-            **m,
-            "match": normalized_name,
-            "match_id": generate_match_id(normalized_name, m["match_time"])
-        })
+        # Split match into home and away teams
+        if " vs " in m["match"]:
+            home_team, away_team = m["match"].split(" vs ")
+        elif " - " in m["match"]:
+            home_team, away_team = m["match"].split(" - ")
+        else:
+            home_team, away_team = m["match"], ""
+
+        normalized_matches.append(
+            build_match_dict(
+                home_team=home_team,
+                away_team=away_team,
+                start_time=m["match_time"],
+                market=m["market"],
+                odds=m["odds"],
+                bookmaker=m["bookmaker"]
+            )
+        )
 
     return normalized_matches
+
+if __name__ == "__main__":
+    data = get_odds()
+    print(data)

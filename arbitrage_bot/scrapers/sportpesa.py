@@ -1,6 +1,6 @@
-# scrapers/sportpesa_scraper.py
+# scrapers/sportpesa.py
 
-from utils.match_utils import normalize_market, normalize_odds, normalize_match_name
+from utils.match_utils import build_match_dict
 
 def get_odds():
     raw_data = [
@@ -35,14 +35,29 @@ def get_odds():
 
     normalized_data = []
     for item in raw_data:
-        normalized_data.append({
-            "sport": item["sport"],
-            "match": normalize_match_name(item["match"]),
-            "market": normalize_market(item["market"]),
-            "bookmaker": item["bookmaker"],
-            "odds": normalize_odds(item["odds"], item["market"]),
-            "match_time": item["match_time"],
-            "url": item["url"]
-        })
+        # Split match into home and away teams
+        if " vs " in item["match"]:
+            home_team, away_team = item["match"].split(" vs ")
+        elif " - " in item["match"]:
+            home_team, away_team = item["match"].split(" - ")
+        elif " v " in item["match"]:
+            home_team, away_team = item["match"].split(" v ")
+        else:
+            home_team, away_team = item["match"], ""
+
+        normalized_data.append(
+            build_match_dict(
+                home_team=home_team,
+                away_team=away_team,
+                start_time=item["match_time"],
+                market=item["market"],
+                odds=item["odds"],
+                bookmaker=item["bookmaker"]
+            )
+        )
 
     return normalized_data
+
+if __name__ == "__main__":
+    data = get_odds()
+    print(data)
