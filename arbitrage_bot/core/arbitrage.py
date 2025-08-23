@@ -136,7 +136,14 @@ def _best_prices(entries: List[Dict[str, Any]]):
             if fv > best_odds[opt] and fv > 1.0:
                 best_odds[opt], best_books[opt], best_urls[opt] = fv, e["bookmaker"], e.get("url", "")
 
-    return best_odds, best_books, best_urls, entries[0].get("sport", "Football"), entries[0]["match_label"], entries[0].get("start_time", "")
+    return (
+        best_odds,
+        best_books,
+        best_urls,
+        entries[0].get("sport", "Football"),
+        entries[0]["match_label"],
+        entries[0].get("start_time", ""),
+    )
 
 
 # ------------------------------
@@ -188,14 +195,25 @@ class ArbitrageFinder:
     def scan_and_alert(self, all_entries: List[Dict[str, Any]], alert_sender=send_telegram_alert) -> int:
         grouped = _group_by_match_market(all_entries)
         alerts_sent = 0
+        now_dt = datetime.utcnow()
 
         for (match_label, market), entries in grouped.items():
             if len(entries) < 2:
                 continue
 
-            best_odds, best_books, best_urls, sport, _, start_time = _best_prices(entries)
+            best_odds, best_books, best_urls, sport, _, start_time_str = _best_prices(entries)
             if not best_odds or all(v <= 1.0 for v in best_odds.values()):
                 continue
+
+            # --- PREMATCH FILTER ---
+            if start_time_str:
+                try:
+                    match_start_dt = datetime.fromisoformat(start_time_str.replace("Z", ""))
+                    if match_start_dt <= now_dt:
+                        log_info(f"⏭ Skipping past match: {match_label} ({start_time_str})")
+                        continue
+                except Exception:
+                    pass  # if date parsing fails, we still proceed
 
             result = self._calc_arbitrage(best_odds)
             if not result:
@@ -205,42 +223,39 @@ class ArbitrageFinder:
                 continue
 
             if result["profit"] < self.min_profit_absolute:
-                continue   # ✅ fixed indentation here
+                continue
 
-            # ✅ persist into DB always
+            # Persist into DB always
             try:
-                match_id = db.upsert_match(
+                db.upsert_match(
                     match_uid=f"{sport}:{match_label}:{market}",
                     home_team=match_label.split(" vs ")[0],
                     away_team=match_label.split(" vs ")[1] if " vs " in match_label else "",
                     market_name=market,
                     bookmaker=best_books.get(next(iter(best_books)), "Unknown"),
                     odds_dict=best_odds,
-                    start_time_iso=start_time,
+                    start_time_iso=start_time_str,
                     offer_url=best_urls.get(next(iter(best_urls)), "")
                 )
-
-                for opt, odd in best_odds.items():
-                    book = best_books.get(opt, "")
-                    url = best_urls.get(opt, "")
-                    db.upsert_odds(
-                        match_id=match_id,
-                        bookmaker_name=book,
-                        bookmaker_url=url,
-                        odds_dict={opt: odd},
-                        offer_url=url,
-                    )
             except Exception as e:
                 log_error(f"⚠️ DB persistence failed for {match_label} {market}: {e}")
 
-            # ✅ send alert only if not duplicate
-            cache_key = f"{sport}::{match_label}::{market}::{start_time}"
-            if not self.cache.is_duplicate_alert(cache_key, result):
+            # Send alert using updated cache
+            cache_key = f"{sport}::{match_label}::{market}::{start_time_str}"
+            result_cache = {
+                "match": match_label,
+                "market": market,
+                "match_time": start_time_str,
+                "profit": result["profit"],
+                "roi": result["roi"],
+                "odds": best_odds,
+            }
+            if not self.cache.is_duplicate_alert(cache_key, result_cache):
                 log_success(
                     f"📣 ALERT: {match_label} | {market} | Profit: {round(result['profit'], 2)} | ROI: {round(result['roi'], 2)}%"
                 )
                 opportunity = ArbitrageOpportunity(
-                    match_label, market, sport, start_time, best_odds, best_books, best_urls, result
+                    match_label, market, sport, start_time_str, best_odds, best_books, best_urls, result
                 )
                 try:
                     alert_sender(opportunity.format_alert())
@@ -248,10 +263,13 @@ class ArbitrageFinder:
                     log_error(f"⚠️ Failed to send alert: {e}")
                 else:
                     alerts_sent += 1
+                    # Update last_sent in cache after sending
+                    self.cache.store_alert(
+                        match_label, market, start_time_str, result["profit"], result["roi"], best_odds
+                    )
             else:
                 log_info(f"⏭ Duplicate skipped: {cache_key}")
 
-        # ✅ cleanup expired cache entries after each scan
+        # Cleanup expired cache entries after each scan
         self.cache.cleanup()
-
         return alerts_sent
