@@ -16,7 +16,10 @@ from core.telegram import send_telegram_alert, run_bot
 from scrapers.odibets import get_odds as get_odibets
 from scrapers.betika import get_odds as get_betika
 from scrapers.sportpesa import get_odds as get_sportpesa
+from core.db import init_db 
 
+# Ensure DB schema is created
+init_db()
 # Global cache
 cache = Cache()
 

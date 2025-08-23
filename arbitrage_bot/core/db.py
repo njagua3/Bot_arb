@@ -60,34 +60,38 @@ def get_cursor(commit: bool = True):
 def init_db():
     """
     Initialize schema including opportunities.
-    SQLite: JSON → TEXT fallback
-    MySQL: real JSON type
+    SQLite: JSON → TEXT fallback, AUTOINCREMENT syntax, conflict handling.
+    MySQL: real JSON type, AUTO_INCREMENT syntax, ON DUPLICATE KEY.
+    Automatically drops duplicate indexes if they already exist.
+    Also removes legacy columns (like `odds` in odds_history) if present.
     """
-    json_type = "JSON" if not url.drivername.startswith("sqlite") else "TEXT"
+    is_sqlite = url.drivername.startswith("sqlite")
+    json_type = "JSON" if not is_sqlite else "TEXT"
+    pk = "INTEGER PRIMARY KEY AUTOINCREMENT" if is_sqlite else "INT AUTO_INCREMENT PRIMARY KEY"
 
     ddl = [
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS teams (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {pk},
             name VARCHAR(255) UNIQUE
-        );
+        )
         """,
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS bookmakers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {pk},
             name VARCHAR(255) UNIQUE,
             url VARCHAR(1024)
-        );
+        )
         """,
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS markets (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {pk},
             name VARCHAR(255) UNIQUE
-        );
+        )
         """,
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS matches (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {pk},
             match_uid VARCHAR(64) UNIQUE,
             home_team_id INT,
             away_team_id INT,
@@ -96,11 +100,11 @@ def init_db():
             FOREIGN KEY(home_team_id) REFERENCES teams(id) ON DELETE CASCADE,
             FOREIGN KEY(away_team_id) REFERENCES teams(id) ON DELETE CASCADE,
             FOREIGN KEY(market_id) REFERENCES markets(id) ON DELETE CASCADE
-        );
+        )
         """,
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS odds (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {pk},
             match_id INT,
             bookmaker_id INT,
             option_key VARCHAR(32),
@@ -110,11 +114,11 @@ def init_db():
             UNIQUE(match_id, bookmaker_id, option_key),
             FOREIGN KEY(match_id) REFERENCES matches(id) ON DELETE CASCADE,
             FOREIGN KEY(bookmaker_id) REFERENCES bookmakers(id) ON DELETE CASCADE
-        );
+        )
         """,
-        """
+        f"""
         CREATE TABLE IF NOT EXISTS odds_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {pk},
             match_id INT,
             bookmaker_id INT,
             market_id INT,
@@ -124,11 +128,11 @@ def init_db():
             recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(match_id) REFERENCES matches(id) ON DELETE CASCADE,
             FOREIGN KEY(bookmaker_id) REFERENCES bookmakers(id) ON DELETE CASCADE
-        );
+        )
         """,
         f"""
         CREATE TABLE IF NOT EXISTS opportunities (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {pk},
             match_label VARCHAR(255),
             market VARCHAR(64),
             sport VARCHAR(64),
@@ -137,24 +141,51 @@ def init_db():
             best_books {json_type},
             best_urls {json_type},
             stakes {json_type},
-            profit REAL,
-            roi REAL,
+            profit DOUBLE,
+            roi DOUBLE,
             alert_sent BOOLEAN DEFAULT 0,
             detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(match_label, market, start_time)
-        );
-        """,
-        # Indexes for performance
-        "CREATE INDEX IF NOT EXISTS idx_matches_start_time ON matches(start_time);",
-        "CREATE INDEX IF NOT EXISTS idx_odds_match_bookmaker ON odds(match_id, bookmaker_id);",
+        )
+        """
     ]
+
     with get_cursor() as cur:
+        # --- Create/Update Tables ---
         for stmt in ddl:
             try:
                 cur.execute(stmt)
             except Exception as e:
                 print(f"⚠️ Skipped statement due to: {e}")
 
+        # --- Index Management ---
+        if is_sqlite:
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_matches_start_time ON matches(start_time)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_odds_match_bookmaker ON odds(match_id, bookmaker_id)")
+        else:
+            # Drop duplicate indexes first (clean-up step)
+            cur.execute("SHOW INDEX FROM matches WHERE Key_name='idx_matches_start_time'")
+            if cur.fetchone():
+                cur.execute("DROP INDEX idx_matches_start_time ON matches")
+            cur.execute("SHOW INDEX FROM odds WHERE Key_name='idx_odds_match_bookmaker'")
+            if cur.fetchone():
+                cur.execute("DROP INDEX idx_odds_match_bookmaker ON odds")
+
+            # Recreate them cleanly
+            cur.execute("CREATE INDEX idx_matches_start_time ON matches(start_time)")
+            cur.execute("CREATE INDEX idx_odds_match_bookmaker ON odds(match_id, bookmaker_id)")
+
+            # --- Legacy Column Cleanup (MySQL only) ---
+            cur.execute("""
+                SELECT COLUMN_NAME
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = 'odds_history'
+                  AND COLUMN_NAME = 'odds'
+            """)
+            if cur.fetchone():
+                print("🧹 Removing legacy column 'odds' from odds_history...")
+                cur.execute("ALTER TABLE odds_history DROP COLUMN odds")
 
 # ================================================================
 # PERSIST OPPORTUNITIES

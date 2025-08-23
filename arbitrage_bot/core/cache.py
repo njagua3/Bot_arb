@@ -3,9 +3,10 @@ Cache system for storing and detecting duplicate arbitrage alerts.
 
 Features:
 - Prevents spamming identical alerts.
-- Resends alerts if ROI/profit/odds change, even if the match/market is the same.
+- Resends alerts if ROI/profit/odds change immediately.
+- Resends unchanged alerts only after 30 minutes.
 - Persists cache to disk for continuity across restarts.
-- Adds detailed logging so you know WHY an alert was resent/skipped.
+- Adds detailed logging.
 """
 
 import hashlib
@@ -17,6 +18,7 @@ from pathlib import Path
 from collections import deque
 from typing import Dict, Any
 
+RESEND_INTERVAL = 30 * 60  # 30 minutes
 
 class Cache:
     def __init__(self, cache_dir: str = "data", max_size: int = 10000, expiry_seconds: int = 3600):
@@ -69,7 +71,7 @@ class Cache:
         """
         Check if an alert is a duplicate using the result dict and cache key.
         - Returns False if profit/roi/odds have changed OR TTL expired.
-        - Returns True if identical and still within TTL.
+        - Returns True if identical and still within RESEND_INTERVAL.
         """
         now = time.time()
         match = result.get("match")
@@ -80,27 +82,28 @@ class Cache:
         odds_snapshot = result.get("odds") or result.get("odds_snapshot", {})
 
         with self._lock:
-            if key not in self._cache_map:
+            record = self._cache_map.get(key)
+            if not record:
                 self.logger.info(f"[CACHE] New opportunity → {match} ({market})")
                 return False
 
-            record = self._cache_map[key]
-            age = now - record["timestamp"]
+            age_since_last_sent = now - record.get("last_sent", 0)
+            age_since_created = now - record["timestamp"]
 
-            # Expired
-            if age > self.expiry_seconds:
-                self.logger.info(f"[CACHE] Resent → expired TTL ({age:.0f}s old) for {match} ({market})")
+            # Expired TTL
+            if age_since_created > self.expiry_seconds:
+                self.logger.info(f"[CACHE] Resent → expired TTL ({age_since_created:.0f}s) for {match} ({market})")
                 return False
 
             # Profit changed
-            if round(profit, 2) != round(record["profit"], 2):
+            if round(profit, 2) != round(record['profit'], 2):
                 self.logger.info(
                     f"[CACHE] Resent → profit changed {record['profit']:.2f} → {profit:.2f} KES for {match} ({market})"
                 )
                 return False
 
             # ROI changed
-            if round(roi, 2) != round(record.get("roi", 0.0), 2):
+            if round(roi, 2) != round(record.get('roi', 0.0), 2):
                 self.logger.info(
                     f"[CACHE] Resent → ROI changed {record.get('roi', 0.0):.2f}% → {roi:.2f}% for {match} ({market})"
                 )
@@ -114,11 +117,16 @@ class Cache:
                 )
                 return False
 
-            # Exact duplicate
-            self.logger.info(
-                f"[CACHE] Skipped duplicate → {match} ({market}), profit {profit:.2f} KES, ROI {roi:.2f}%"
-            )
-            return True
+            # Duplicate, unchanged → resend only after RESEND_INTERVAL
+            if age_since_last_sent < RESEND_INTERVAL:
+                self.logger.info(
+                    f"[CACHE] Skipped duplicate → {match} ({market}), sent {age_since_last_sent/60:.1f} min ago"
+                )
+                return True
+
+            # Ready to resend
+            self.logger.info(f"[CACHE] Ready to resend after interval → {match} ({market})")
+            return False
 
     def store_alert(self, match: str, market: str, match_time: str,
                     profit: float, roi: float, odds_snapshot: Dict[str, Any]) -> None:
@@ -135,6 +143,7 @@ class Cache:
             "roi": round(float(roi), 2),
             "odds": odds_snapshot,
             "timestamp": now,
+            "last_sent": now,  # track last alert sent
         }
 
         with self._lock:
