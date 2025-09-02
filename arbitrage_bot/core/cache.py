@@ -1,12 +1,10 @@
 """
-Cache system for storing and detecting duplicate arbitrage alerts.
+Cache for arbitrage alerts.
 
-Features:
-- Prevents spamming identical alerts.
-- Resends alerts if ROI/profit/odds change immediately.
-- Resends unchanged alerts only after 30 minutes.
-- Persists cache to disk for continuity across restarts.
-- Adds detailed logging.
+- Avoids spamming duplicates.
+- Resends if profit/ROI/odds change.
+- Resends unchanged only after 30 min.
+- Persists to disk across restarts.
 """
 
 import hashlib
@@ -18,7 +16,8 @@ from pathlib import Path
 from collections import deque
 from typing import Dict, Any
 
-RESEND_INTERVAL = 30 * 60  # 30 minutes
+RESEND_INTERVAL = 30 * 60  # 30 min
+
 
 class Cache:
     def __init__(self, cache_dir: str = "data", max_size: int = 10000, expiry_seconds: int = 3600):
@@ -27,29 +26,22 @@ class Cache:
         self.max_size = max_size
         self.expiry_seconds = expiry_seconds
 
-        # In-memory state
         self._cache_order = deque(maxlen=max_size)
         self._cache_map: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
 
-        # Ensure dir exists
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-        # Setup logging
         logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
         self.logger = logging.getLogger(__name__)
 
-        # Load previous cache
         self.load()
 
-    # ---------- Helpers ----------
     def _make_key(self, match: str, market: str, match_time: str) -> str:
         raw = f"{(match or '').strip().lower()}_{(market or '').strip().lower()}_{(match_time or '').strip()}"
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
-    # ---------- Persistence ----------
     def load(self) -> None:
-        """Load alerts from disk into memory."""
         if not self.cache_file.exists():
             return
         try:
@@ -66,71 +58,42 @@ class Cache:
         except Exception as e:
             self.logger.error(f"⚠️ Failed to load alert cache: {e}")
 
-    # ---------- Main API ----------
-    def is_duplicate_alert(self, key: str, result: Dict[str, Any]) -> bool:
+    def check_alert_status(self, match: str, market: str, match_time: str,
+                           profit: float, roi: float, odds_snapshot: Dict[str, Any]) -> str:
         """
-        Check if an alert is a duplicate using the result dict and cache key.
-        - Returns False if profit/roi/odds have changed OR TTL expired.
-        - Returns True if identical and still within RESEND_INTERVAL.
+        Decide if alert is new/update/duplicate.
+        Returns: "new", "update", or "duplicate".
         """
         now = time.time()
-        match = result.get("match")
-        market = result.get("market_name") or result.get("market")
-        match_time = result.get("match_time")
-        profit = result.get("profit")
-        roi = result.get("roi")
-        odds_snapshot = result.get("odds") or result.get("odds_snapshot", {})
+        key = self._make_key(match, market, match_time)
 
         with self._lock:
             record = self._cache_map.get(key)
             if not record:
-                self.logger.info(f"[CACHE] New opportunity → {match} ({market})")
-                return False
+                return "new"
 
-            age_since_last_sent = now - record.get("last_sent", 0)
-            age_since_created = now - record["timestamp"]
+            age_last = now - record.get("last_sent", 0)
+            age_created = now - record["timestamp"]
 
-            # Expired TTL
-            if age_since_created > self.expiry_seconds:
-                self.logger.info(f"[CACHE] Resent → expired TTL ({age_since_created:.0f}s) for {match} ({market})")
-                return False
+            if age_created > self.expiry_seconds:
+                return "update"
 
-            # Profit changed
-            if round(profit, 2) != round(record['profit'], 2):
-                self.logger.info(
-                    f"[CACHE] Resent → profit changed {record['profit']:.2f} → {profit:.2f} KES for {match} ({market})"
-                )
-                return False
+            if round(profit, 2) != round(record["profit"], 2):
+                return "update"
 
-            # ROI changed
-            if round(roi, 2) != round(record.get('roi', 0.0), 2):
-                self.logger.info(
-                    f"[CACHE] Resent → ROI changed {record.get('roi', 0.0):.2f}% → {roi:.2f}% for {match} ({market})"
-                )
-                return False
+            if round(roi, 2) != round(record.get("roi", 0.0), 2):
+                return "update"
 
-            # Odds changed
-            old_odds = record.get("odds", {})
-            if odds_snapshot != old_odds:
-                self.logger.info(
-                    f"[CACHE] Resent → odds changed {old_odds} → {odds_snapshot} for {match} ({market})"
-                )
-                return False
+            if odds_snapshot != record.get("odds", {}):
+                return "update"
 
-            # Duplicate, unchanged → resend only after RESEND_INTERVAL
-            if age_since_last_sent < RESEND_INTERVAL:
-                self.logger.info(
-                    f"[CACHE] Skipped duplicate → {match} ({market}), sent {age_since_last_sent/60:.1f} min ago"
-                )
-                return True
+            if age_last < RESEND_INTERVAL:
+                return "duplicate"
 
-            # Ready to resend
-            self.logger.info(f"[CACHE] Ready to resend after interval → {match} ({market})")
-            return False
+            return "update"
 
     def store_alert(self, match: str, market: str, match_time: str,
                     profit: float, roi: float, odds_snapshot: Dict[str, Any]) -> None:
-        """Store/update an alert in memory + disk."""
         now = time.time()
         key = self._make_key(match, market, match_time)
 
@@ -143,7 +106,7 @@ class Cache:
             "roi": round(float(roi), 2),
             "odds": odds_snapshot,
             "timestamp": now,
-            "last_sent": now,  # track last alert sent
+            "last_sent": now,
         }
 
         with self._lock:
@@ -151,12 +114,10 @@ class Cache:
                 self._cache_order.append(key)
             self._cache_map[key] = record
 
-            # Trim
             while len(self._cache_order) > self.max_size:
                 evicted = self._cache_order.popleft()
                 self._cache_map.pop(evicted, None)
 
-            # Append to disk
             try:
                 with self.cache_file.open("a", encoding="utf-8") as f:
                     f.write(json.dumps(record) + "\n")
@@ -164,7 +125,6 @@ class Cache:
                 self.logger.error(f"⚠️ Failed to write alert cache: {e}")
 
     def clear(self) -> None:
-        """Clear in-memory and on-disk cache completely."""
         with self._lock:
             self._cache_order.clear()
             self._cache_map.clear()
@@ -176,21 +136,19 @@ class Cache:
                 self.logger.error(f"⚠️ Failed to clear cache: {e}")
 
     def size(self) -> int:
-        """Return current cache size."""
         with self._lock:
             return len(self._cache_order)
 
     def cleanup(self) -> None:
-        """Remove expired entries from cache (optional)."""
         now = time.time()
-        expired_keys = []
+        expired = []
         with self._lock:
             for k, record in list(self._cache_map.items()):
                 if now - record["timestamp"] > self.expiry_seconds:
-                    expired_keys.append(k)
-            for k in expired_keys:
+                    expired.append(k)
+            for k in expired:
                 self._cache_map.pop(k, None)
                 if k in self._cache_order:
                     self._cache_order.remove(k)
-        if expired_keys:
-            self.logger.info(f"[CACHE] Cleaned up {len(expired_keys)} expired entries")
+        if expired:
+            self.logger.info(f"[CACHE] Cleaned {len(expired)} expired entries")

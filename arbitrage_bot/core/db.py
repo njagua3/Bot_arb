@@ -1,5 +1,3 @@
-# core/db.py
-
 import sqlite3
 import pymysql
 from contextlib import contextmanager
@@ -86,7 +84,9 @@ def init_db():
         f"""
         CREATE TABLE IF NOT EXISTS markets (
             id {pk},
-            name VARCHAR(255) UNIQUE
+            name VARCHAR(255),
+            param VARCHAR(64),
+            UNIQUE(name, param)
         )
         """,
         f"""
@@ -187,6 +187,7 @@ def init_db():
                 print("🧹 Removing legacy column 'odds' from odds_history...")
                 cur.execute("ALTER TABLE odds_history DROP COLUMN odds")
 
+
 # ================================================================
 # PERSIST OPPORTUNITIES
 # ================================================================
@@ -279,7 +280,7 @@ def cleanup_db(days=30):
 # ================================================================
 # UPSERT MATCH + ODDS
 # ================================================================
-def upsert_match(home_team, away_team, bookmaker, market_name,
+def upsert_match(home_team, away_team, bookmaker, market_name, market_param,
                  odds_dict, start_time=None, start_time_iso=None, offer_url=None, match_uid=None):
     """
     Unified upsert for matches, teams, markets, bookmakers, odds, and odds history.
@@ -305,12 +306,12 @@ def upsert_match(home_team, away_team, bookmaker, market_name,
         cur.execute(f"SELECT id FROM teams WHERE name={ph}", (away_team,))
         away_team_id = first_col(cur.fetchone())
 
-        # --- Market ---
+        # --- Market (with param) ---
         if url.drivername.startswith("sqlite"):
-            cur.execute(f"INSERT OR IGNORE INTO markets (name) VALUES ({ph})", (market_name,))
+            cur.execute(f"INSERT OR IGNORE INTO markets (name, param) VALUES ({ph}, {ph})", (market_name, market_param))
         else:
-            cur.execute(f"INSERT IGNORE INTO markets (name) VALUES ({ph})", (market_name,))
-        cur.execute(f"SELECT id FROM markets WHERE name={ph}", (market_name,))
+            cur.execute(f"INSERT IGNORE INTO markets (name, param) VALUES ({ph}, {ph})", (market_name, market_param))
+        cur.execute(f"SELECT id FROM markets WHERE name={ph} AND param={ph}", (market_name, market_param))
         market_id = first_col(cur.fetchone())
 
         # --- Bookmaker ---
@@ -393,7 +394,6 @@ def upsert_match(home_team, away_team, bookmaker, market_name,
                 """, (match_id, bookmaker_id, option_key, decimal_odds, offer_link))
 
         return match_id
-
 
 
 if __name__ == "__main__":

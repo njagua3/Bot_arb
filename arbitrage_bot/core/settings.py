@@ -2,21 +2,22 @@
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Tuple
 
 # Allow dynamic config file path via environment variable
 SETTINGS_FILE = Path(os.getenv("SETTINGS_FILE", "data/settings.json"))
 SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
 
 DEFAULT_SETTINGS: Dict[str, Any] = {
-    "stake": 10000,                # Default stake in local currency
-    "min_profit_percent": 3.0,     # Ignore arbitrage opportunities < 2%
-    "min_profit_absolute": 300.0,    # Ignore arbitrage opportunities < 1 KES
-    "cache_expiry_minutes": 5,     # Cached results expiry
-    "scan_interval": 180,          # Interval between scans (seconds)
-    "log_dir": "data",             # Log directory
-    "log_file": "arb_log.txt",     # Log filename
-    "log_console": True            # Print logs to console
+    "stake": 10000,
+    "min_profit_percent": 3.0,
+    "min_profit_absolute": 300.0,
+    "cache_expiry_minutes": 5,
+    "scan_interval": 180,
+    "log_dir": "data",
+    "log_file": "arb_log.txt",
+    "log_console": True,
+    "scrapers": []  # ✅ default empty list
 }
 
 
@@ -31,6 +32,8 @@ def validate_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
     validated["cache_expiry_minutes"] = int(validated.get("cache_expiry_minutes", DEFAULT_SETTINGS["cache_expiry_minutes"]))
     validated["scan_interval"] = int(validated.get("scan_interval", DEFAULT_SETTINGS["scan_interval"]))
     validated["log_console"] = bool(validated.get("log_console", DEFAULT_SETTINGS["log_console"]))
+    # Ensure scrapers is always a list of tuples
+    validated["scrapers"] = [tuple(x) for x in validated.get("scrapers", [])]
     return validated
 
 
@@ -62,7 +65,6 @@ def get_setting(key: str, default: Any = None) -> Any:
     Fetch a single setting with fallback.
     Priority: Environment variable -> JSON file -> Default.
     """
-    # 1. Check environment variable
     env_val = os.getenv(key.upper())
     if env_val is not None:
         try:
@@ -70,7 +72,6 @@ def get_setting(key: str, default: Any = None) -> Any:
         except Exception:
             return env_val
 
-    # 2. Check settings.json
     settings = load_settings()
     return settings.get(key, default)
 
@@ -93,5 +94,6 @@ def set_stake(value: float) -> None:
     set_setting("stake", float(value))
 
 
-# ✅ Export scan interval constant for main.py
+# ✅ Export scan interval and scrapers for main.py
 SCAN_INTERVAL: int = get_setting("scan_interval", DEFAULT_SETTINGS["scan_interval"])
+SCRAPERS: List[Tuple[str, str]] = get_setting("scrapers", DEFAULT_SETTINGS["scrapers"])

@@ -2,44 +2,13 @@
 
 import re
 from typing import Any, Dict, Optional
-from datetime import datetime
 from dateutil import parser, tz
-from rapidfuzz import process
 
 # Import the new structured Market system
 from core.markets import normalize_market_name, Market
 
-# ================================================================
-# TEAM NAME NORMALIZATION
-# ================================================================
-TEAM_ALIASES = {
-    "man utd": "Manchester United",
-    "man united": "Manchester United",
-    "man city": "Manchester City",
-    "bayern": "Bayern Munich",
-    "psg": "Paris Saint-Germain",
-    "inter": "Inter Milan",
-    "spurs": "Tottenham Hotspur",
-}
-
-def normalize_team_name(name: str) -> str:
-    if not name:
-        return ""
-    raw_name = name.strip().lower()
-    raw_name = re.sub(r"\b(fc|cf|sc|afc|cfc)$", "", raw_name).strip()
-    
-    # Direct alias match
-    if raw_name in TEAM_ALIASES:
-        return TEAM_ALIASES[raw_name]
-
-    # Fuzzy match
-    result = process.extractOne(raw_name, TEAM_ALIASES.keys(), score_cutoff=85)
-    if result:
-        match, score, _ = result
-        return TEAM_ALIASES.get(match, raw_name.title())
-    
-    # Fallback
-    return raw_name.title()
+# ✅ Import team normalization (centralized in utils/team_utils)
+from utils.team_utils import normalize_team
 
 
 # ================================================================
@@ -62,6 +31,7 @@ def normalize_odds(value: Any) -> Optional[float]:
     except ValueError:
         return None
 
+
 def normalize_odds_keys(odds: dict) -> dict:
     mapping = {
         "home": "1", "draw": "X", "away": "2",
@@ -79,14 +49,14 @@ def normalize_odds_keys(odds: dict) -> dict:
 # ================================================================
 def build_match_dict(home_team: str, away_team: str, start_time: str,
                      market: str, odds: Dict[str, Any], bookmaker: str) -> Dict[str, Any]:
-    normalized_market: Optional[Market] = normalize_market_name(market)
+    normalized_market: Market = normalize_market_name(market)
 
     return {
-        "home_team": normalize_team_name(home_team),
-        "away_team": normalize_team_name(away_team),
+        "home_team": normalize_team(home_team),
+        "away_team": normalize_team(away_team),
         "start_time": parse_datetime(start_time),
-        "market": normalized_market.name if normalized_market else market,   # fallback to raw
-        "market_obj": normalized_market,  # keep the full Market object for advanced use
+        "market": normalized_market.name,   # always safe, fallback handled
+        "market_obj": normalized_market,   # structured Market object
         "odds": normalize_odds_keys(odds),
         "bookmaker": bookmaker,
     }

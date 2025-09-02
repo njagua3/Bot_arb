@@ -1,5 +1,4 @@
 # core/telegram.py
-import html
 import os
 import requests
 from dotenv import load_dotenv
@@ -28,7 +27,7 @@ def send_telegram_alert(message: str):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     data = {
         "chat_id": CHAT_ID,
-        "text": html.escape(message),   # ✅ escape unsafe HTML chars
+        "text": message,          # ✅ no escaping, we want HTML markup to render
         "parse_mode": "HTML"
     }
 
@@ -42,7 +41,6 @@ def send_telegram_alert(message: str):
         logger.exception(f"❌ Network/Request error while sending Telegram alert: {e}")
     except Exception as e:
         logger.exception(f"❌ Unexpected error while sending Telegram alert: {e}")
-
 
 
 # =============== BOT COMMANDS ===============
@@ -85,7 +83,6 @@ def run_bot():
 
     logger.info("🤖 Telegram Bot is running in background thread.")
     updater.start_polling()   # ✅ no idle()
-    # updater.idle()  <-- ❌ remove this
 
 
 # Run directly

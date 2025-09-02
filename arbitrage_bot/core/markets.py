@@ -12,7 +12,7 @@ class Market:
         """
         :param name: Standardized market name (e.g. "1X2", "Over/Under 2.5")
         :param outcomes: List of possible outcomes (e.g. ["1","X","2"])
-        :param mtype: "2-way" or "3-way"
+        :param mtype: "2-way", "3-way", or "special"
         :param param: Optional market parameter (e.g. 2.5 for totals/handicap)
         """
         self.name = name
@@ -38,32 +38,39 @@ BASE_MARKETS: Dict[str, Market] = {
 # ================================================================
 # NORMALIZATION FUNCTION
 # ================================================================
-def normalize_market_name(raw: str) -> Optional[Market]:
+def normalize_market_name(raw: str) -> Market:
     """
     Normalize raw bookmaker market name into a structured Market object.
     Handles dynamic markets like Over/Under and Handicap.
+    Returns a fallback Market if unknown.
     """
     if not raw:
-        return None
+        return Market("Unknown", [], "special")
 
     market = raw.strip().lower()
 
     # -----------------------------
     # 1X2 / Full time result
     # -----------------------------
-    if market in ["1x2", "full time result", "result"]:
+    if market in ["1x2", "full time result", "result", "ft result", "match odds"]:
         return BASE_MARKETS["1X2"]
 
     # -----------------------------
     # Match Winner (2-way, no draw)
     # -----------------------------
-    if market in ["match winner", "moneyline"]:
+    if market in ["match winner", "moneyline", "to win"]:
         return BASE_MARKETS["MATCH WINNER"]
+
+    # -----------------------------
+    # DNB / AH(0) → same as Match Winner
+    # -----------------------------
+    if market in ["dnb", "draw no bet", "ah(0)", "asian handicap 0", "handicap 0"]:
+        return Market("Draw No Bet", ["1", "2"], "2-way", 0)
 
     # -----------------------------
     # BTTS
     # -----------------------------
-    if market in ["btts", "both teams to score", "gg/ng", "gg-ng"]:
+    if market in ["btts", "both teams to score", "gg/ng", "gg-ng", "goal goal", "btts yes/no"]:
         return BASE_MARKETS["BTTS"]
 
     # -----------------------------
@@ -74,19 +81,26 @@ def normalize_market_name(raw: str) -> Optional[Market]:
 
     # -----------------------------
     # Handicap / Asian Handicap
+    # e.g. "AHC +1.5", "asian handicap -1", "handicap +2"
     # -----------------------------
-    hc_match = re.search(r"(ahc|handicap|asian)[^\d]*([+-]?\d+(\.\d)?)", market)
+    hc_match = re.search(r"(ahc|handicap|asian)[^\d+-]*([+-]?\d+(?:\.\d)?)", market)
     if hc_match:
         param = float(hc_match.group(2))
         return Market(f"Handicap {param}", ["Home", "Away"], "2-way", param)
 
     # -----------------------------
     # Over/Under
+    # e.g. "Over 2.5", "O2.5", "Under1.5"
     # -----------------------------
-    ou_match = re.search(r"(over|under|o|u)[^\d]*(\d+(\.\d)?)", market)
+    ou_match = re.search(r"\b(o|over|u|under)[^\d]*(\d+(?:\.\d)?)", market)
     if ou_match:
         param = float(ou_match.group(2))
-        return Market(f"Over/Under {param}", [f"Over {param}", f"Under {param}"], "2-way", param)
+        return Market(
+            f"Over/Under {param}",
+            [f"Over {param}", f"Under {param}"],
+            "2-way",
+            param,
+        )
 
     # -----------------------------
     # Exact Goals
@@ -97,6 +111,6 @@ def normalize_market_name(raw: str) -> Optional[Market]:
         return Market(f"Exact Goals {param}", [f"Exactly {param}"], "special", param)
 
     # -----------------------------
-    # Unknown → return None (or fallback Market)
+    # Unknown → return fallback Market
     # -----------------------------
-    return None
+    return Market(raw.strip(), [], "special")
