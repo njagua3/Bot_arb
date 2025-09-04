@@ -1,3 +1,4 @@
+# Core
 APScheduler==3.6.3
 cachetools==4.2.2
 certifi==2025.7.14
@@ -19,3 +20,21 @@ typing_extensions==4.14.1
 tzlocal==5.3.1
 urllib3==2.5.0
 python-dateutil==2.9.0.post0
+
+# For async_base_scraper
+httpx==0.27.0
+beautifulsoup4==4.12.3
+playwright==1.47.0
+celery==5.4.0
+
+# For orchestrator (cache/queue)
+redis==5.0.8
+
+# For BaseScraper (browser fallback)
+selenium==4.25.0
+chromedriver-autoinstaller==0.6.4
+lxml==5.3.0
+
+# Since you’re using both Selenium and Playwright, you might want to install browser binaries once and cache them in Docker (if you’re containerizing). Otherwise, playwright install and chromedriver-autoinstaller will fetch them dynamically at runtime.
+# do not fprget playwright install
+#Do you want me to also help you with a Dockerfile that installs everything cleanly (Python + Chrome + Playwright browsers) so deployment is smooth?
