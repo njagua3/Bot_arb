@@ -1,4 +1,4 @@
-#scrapers/async_base_scraper.py
+# scrapers/async_base_scraper.py
 import asyncio
 import json
 import logging
@@ -9,65 +9,75 @@ from typing import List, Dict, Optional, Callable, Tuple, Any
 
 import httpx
 from bs4 import BeautifulSoup
-from playwright.async_api import async_playwright, Browser, BrowserContext, Error as PWError
+from playwright.async_api import async_playwright, Browser, Error as PWError
 
 from scrapers.proxy_pool import ProxyPool
 from utils.match_utils import build_match_dict
-
 from scrapers.tasks import run_playwright_task  # Celery task
-import asyncio
 
 
-logger = logging.getLogger(__name__)
+# --- Structured JSON Logger ---
+logger = logging.getLogger("async_base_scraper")
+handler = logging.StreamHandler()
+formatter = logging.Formatter(
+    json.dumps({
+        "time": "%(asctime)s",
+        "level": "%(levelname)s",
+        "message": "%(message)s",
+        "name": "%(name)s",
+    })
+)
+handler.setFormatter(formatter)
+logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
 
 class AsyncBaseScraper:
     """
     Async scraper with:
+      - User-Agent rotation on every retry
       - rate limiting (shared semaphore or per-instance)
-      - per-endpoint circuit breaker (failure_threshold, recovery_timeout)
-      - retries with exponential backoff + jitter and proxy rotation
-      - proxy latency/success tracking
-      - httpx AsyncClient (trust_env=False to avoid env proxy bleed-through)
-      - Playwright lifecycle with proxy-bound context cache (TTL + LRU)
-      - structured metrics export for observability
+      - per-endpoint circuit breaker
+      - retries with exponential backoff + jitter
+      - proxy pool with latency/success tracking
+      - httpx AsyncClient (lazy)
+      - Playwright lifecycle with proxy-bound context cache
+      - structured logging + metrics snapshot
     """
 
-    # Playwright context cache controls (override in subclasses if desired)
     CONTEXT_TTL_SEC: int = 180
     CONTEXT_CACHE_MAX: int = 6
 
-    def __init__(
-        self,
-        bookmaker: str,
-        base_url: str,
-        proxy_list: Optional[List[str]] = None,
-        max_retries: int = 3,
-        requests_per_minute: int = 60,
-        failure_threshold: int = 5,
-        recovery_timeout: int = 60,
-        rate_limiter: Optional[asyncio.Semaphore] = None,
-        http2: bool = False,
-        request_timeout: float = 20.0,
-    ):
-        self.bookmaker = bookmaker
-        self.base_url = base_url
+    USER_AGENTS = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Safari/605.1.15",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0 Safari/537.36",
+    ]
 
-        # retry defaults (override per-call if needed)
+    def __init__(self,
+                 bookmaker: str,
+                 base_url: str,
+                 proxy_list: Optional[List[str]] = None,
+                 max_retries: int = 3,
+                 requests_per_minute: int = 60,
+                 failure_threshold: int = 5,
+                 recovery_timeout: int = 60,
+                 rate_limiter: Optional[asyncio.Semaphore] = None,
+                 http2: bool = False,
+                 request_timeout: float = 20.0):
+        self.bookmaker = bookmaker
+        self.base_url = base_url.rstrip("/")
+
+        # retry defaults
         self.default_max_retries = max_retries
 
-        # proxy pool (expects methods: get, next, mark_failed, mark_success, mark_latency, stats)
+        # proxy pool
         self.proxy_pool = ProxyPool(proxy_list or [], max_failures=3)
 
-        # user-agent
-        self.ua = random.choice([
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/114.0",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Safari/605.1.15",
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/114.0",
-        ])
+        # initial UA
+        self.ua = random.choice(self.USER_AGENTS)
 
-        # httpx client (created lazily in __aenter__)
+        # httpx client (lazy)
         self.client: Optional[httpx.AsyncClient] = None
         self._http2 = http2
         self._request_timeout = request_timeout
@@ -76,21 +86,22 @@ class AsyncBaseScraper:
         self._playwright = None
         self._browser: Optional[Browser] = None
 
-        # LRU cache for contexts keyed by proxy server string
+        # context cache (per-proxy)
         self._context_cache: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
 
         # metrics
         self.metrics = {
             "requests_made": 0,
+            "successful_requests": 0,
             "failed_requests": 0,
             "matches_collected": 0,
-            "latency_histogram": [],  # raw durations
+            "latency_histogram": [],
             "proxy_success": 0,
             "proxy_fail": 0,
             "endpoint_errors": defaultdict(int),
         }
 
-        # rate limiting (per-instance) — support optional shared limiter
+        # rate limiting
         self.requests_per_minute = requests_per_minute
         self._min_interval = 60.0 / max(1, requests_per_minute)
         self._rate_lock = asyncio.Lock()
@@ -103,7 +114,7 @@ class AsyncBaseScraper:
         self._cb_store: Dict[str, Dict[str, float]] = {}
 
     # --------------------
-    # async context manager lifecycle
+    # lifecycle
     # --------------------
     async def __aenter__(self):
         if not self.client:
@@ -113,8 +124,10 @@ class AsyncBaseScraper:
                 trust_env=False,
                 http2=self._http2,
             )
+            self.log("httpx_client_created")
         self._playwright = await async_playwright().start()
         self._browser = await self._playwright.chromium.launch(headless=True)
+        self.log("browser_started")
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
@@ -125,39 +138,49 @@ class AsyncBaseScraper:
         if self.client:
             try:
                 await self.client.aclose()
-            except Exception:
-                pass
+                self.log("httpx_client_closed")
+            except Exception as e:
+                self.log("httpx_client_close_failed", level="warning", error=str(e))
             self.client = None
 
         # close cached contexts
         for key, cached in list(self._context_cache.items()):
             try:
                 await cached["context"].close()
-            except Exception:
-                pass
+                self.log("context_closed", context_key=key)
+            except Exception as e:
+                self.log("context_close_failed", level="warning", context_key=key, error=str(e))
         self._context_cache.clear()
 
         # close browser
         if self._browser:
             try:
                 await self._browser.close()
-            except Exception:
-                pass
+                self.log("browser_closed")
+            except Exception as e:
+                self.log("browser_close_failed", level="warning", error=str(e))
             self._browser = None
 
         # stop playwright
         if self._playwright:
             try:
                 await self._playwright.stop()
-            except Exception:
-                pass
+                self.log("playwright_stopped")
+            except Exception as e:
+                self.log("playwright_stop_failed", level="warning", error=str(e))
             self._playwright = None
+
+        self.log("cleanup_complete")
 
     # --------------------
     # logging helper
     # --------------------
-    def log(self, event: str, **kwargs):
-        logger.info(json.dumps({"event": event, "bookmaker": self.bookmaker, **kwargs}))
+    def log(self, event: str, level: str = "info", **kwargs):
+        msg = {"event": event, "bookmaker": self.bookmaker, **kwargs}
+        getattr(logger, level)(json.dumps(msg))
+
+    # (rest of your code stays identical: retries, circuit breaker, try_api, try_html, try_browser, hooks, metrics…)
+
 
     # --------------------
     # rate limiting helper
@@ -213,10 +236,10 @@ class AsyncBaseScraper:
         if r["fail_count"] >= self.failure_threshold:
             r["state"] = "open"
             r["opened_at"] = time.time()
-            self.log("circuit_opened", endpoint=key, fail_count=r["fail_count"])
+            self.log("circuit_opened", level="warning", endpoint=key, fail_count=r["fail_count"])
 
     # --------------------
-    # retry wrapper
+    # retry wrapper (with UA rotation)
     # --------------------
     def with_retries(
         self,
@@ -239,7 +262,7 @@ class AsyncBaseScraper:
         async def wrapped(*args, **kwargs):
             cb_key = kwargs.get("cb_key") or (args[0] if args else "default") or "default"
             if not self._cb_allow(cb_key):
-                self.log("circuit_blocked", endpoint=cb_key)
+                self.log("circuit_blocked", level="warning", endpoint=cb_key)
                 return None
 
             local_max_retries = kwargs.pop("max_retries", None) or max_retries or self.default_max_retries
@@ -251,32 +274,66 @@ class AsyncBaseScraper:
 
             for attempt in range(1, local_max_retries + 1):
                 try:
+                    # --- rotate UA for this attempt ---
+                    self.ua = random.choice(self.USER_AGENTS)
+                    if self.client:
+                        # update client header for this attempt
+                        self.client.headers.update({"User-Agent": self.ua})
+
                     await self._acquire_rate_slot()
                     start = time.perf_counter()
                     result = await coro_fn(*args, proxies=proxy, **kwargs)
                     duration = time.perf_counter() - start
+
+                    # metrics & proxy latency
                     self.metrics["latency_histogram"].append(duration)
                     if proxy:
-                        self.proxy_pool.mark_latency(proxy, duration)
+                        try:
+                            self.proxy_pool.mark_latency(proxy, duration)
+                        except Exception:
+                            pass
 
                     if result is not None:
+                        # success
+                        self.metrics["successful_requests"] += 1
                         if proxy:
-                            self.proxy_pool.mark_success(proxy)
-                            self.metrics["proxy_success"] += 1
+                            try:
+                                self.proxy_pool.mark_success(proxy)
+                                self.metrics["proxy_success"] += 1
+                            except Exception:
+                                pass
                         self._cb_record_success(cb_key)
+                        self.log(
+                            "request_success",
+                            level="info",
+                            endpoint=cb_key,
+                            attempt=attempt,
+                            duration_ms=int(duration * 1000),
+                            proxy=proxy["http"] if proxy else None,
+                        )
                         return result
 
-                    # candidate for soft failure (e.g., captcha not solved)
+                    # treat empty result as a soft failure
                     raise RuntimeError("Empty result")
 
                 except local_retry_on as e:
                     last_exc = e
                     self.metrics["failed_requests"] += 1
                     if proxy:
-                        self.metrics["proxy_fail"] += 1
-                        self.proxy_pool.mark_failed(proxy)
+                        try:
+                            self.proxy_pool.mark_failed(proxy)
+                            self.metrics["proxy_fail"] += 1
+                        except Exception:
+                            pass
 
-                    self.log("retry_failed", attempt=attempt, error=str(e), endpoint=cb_key)
+                    self.log(
+                        "retry_failed",
+                        level="warning",
+                        attempt=attempt,
+                        error=str(e),
+                        endpoint=cb_key,
+                        proxy=proxy["http"] if proxy else None,
+                    )
                     if on_retry:
                         try:
                             on_retry(attempt, e, cb_key)
@@ -294,12 +351,13 @@ class AsyncBaseScraper:
                     # non-retryable error: break and record
                     last_exc = e
                     self.metrics["failed_requests"] += 1
+                    self.log("request_error", level="error", error=str(e), endpoint=cb_key)
                     break
 
             # exhausted retries
             self._cb_record_failure(cb_key)
             self.metrics["endpoint_errors"][cb_key] += 1
-            self.log("retries_exhausted", endpoint=cb_key, error=str(last_exc) if last_exc else None)
+            self.log("retries_exhausted", level="error", endpoint=cb_key, error=str(last_exc) if last_exc else None)
             return None
 
         return wrapped
@@ -315,7 +373,7 @@ class AsyncBaseScraper:
         key = proxy["http"] if proxy else "direct"
         now = time.time()
 
-        # prune expired
+        # prune expired entries
         to_delete = []
         for k, cached in self._context_cache.items():
             if now - cached["created_at"] >= self.CONTEXT_TTL_SEC:
@@ -344,9 +402,10 @@ class AsyncBaseScraper:
         if not self._browser:
             raise RuntimeError("Browser not initialized. Use `async with scraper:`")
 
+        # Use current UA when creating context
         context = await self._browser.new_context(
             user_agent=self.ua,
-            proxy={"server": proxy["http"]} if proxy else None
+            proxy={"server": proxy["http"]} if proxy else None,
         )
         self._context_cache[key] = {"context": context, "created_at": now}
         return context
@@ -358,7 +417,7 @@ class AsyncBaseScraper:
     def try_api(self):
         @self.with_retries
         async def _impl(endpoint: str, proxies=None, **kwargs):
-            headers = kwargs.pop("headers", None)
+            headers = kwargs.pop("headers", None) or {}
             timeout = kwargs.pop("timeout", self._request_timeout)
 
             self.metrics["requests_made"] += 1
@@ -369,13 +428,14 @@ class AsyncBaseScraper:
             if "application/json" in ctype or ctype.endswith("+json"):
                 return resp.json()
             return None
+
         return _impl
 
     @property
     def try_static_html(self):
         @self.with_retries
         async def _impl(url: str, proxies=None, **kwargs):
-            headers = kwargs.pop("headers", None)
+            headers = kwargs.pop("headers", None) or {}
             timeout = kwargs.pop("timeout", self._request_timeout)
 
             self.metrics["requests_made"] += 1
@@ -384,11 +444,12 @@ class AsyncBaseScraper:
             html = resp.text
 
             if self.captcha_detect_hook(mode="http", html=html, url=url):
-                self.log("captcha_detected", mode="http", url=url)
+                self.log("captcha_detected", level="warning", mode="http", url=url)
                 solved = await self.captcha_solve_hook(mode="http", html=html, url=url, proxy=proxies)
                 return BeautifulSoup(solved, "html.parser") if solved else None
 
             return BeautifulSoup(html, "html.parser")
+
         return _impl
 
     @property
@@ -400,18 +461,15 @@ class AsyncBaseScraper:
             task (run_playwright_task) and await its result using asyncio.to_thread
             so we don't block the event loop.
             """
-            # If offload flag enabled, call Celery task (works for both sync and async orchestration)
             offload = getattr(self, "offload_browser", False)
             proxy_server = None
             if proxies and isinstance(proxies, dict):
                 proxy_server = proxies.get("http") or proxies.get("https")
 
             if offload:
-                # call Celery task and wait for result in thread to avoid blocking loop
+                # dispatch Celery task and wait in a thread
                 try:
-                    # dispatch task
                     async_result = run_playwright_task.delay(url, self.ua, proxy_server, kwargs.get("timeout", 20))
-                    # wait for result using asyncio.to_thread to call blocking .get()
                     def wait_result():
                         return async_result.get(timeout=kwargs.get("celery_result_timeout", 30))
                     html = await asyncio.to_thread(wait_result)
@@ -419,21 +477,21 @@ class AsyncBaseScraper:
                         return None
                     return html
                 except Exception as e:
-                    self.log("playwright_offload_failed", error=str(e), url=url)
+                    self.log("playwright_offload_failed", level="error", error=str(e), url=url)
                     return None
 
-            # fallback to local Playwright path (original behavior)
+            # fallback to local Playwright path
             if not self._browser:
                 raise RuntimeError("Browser not initialized. Use `async with scraper:`")
 
             context = await self._get_browser_context(proxies)
             page = await context.new_page()
-            await page.goto(url, timeout=20000, wait_until="domcontentloaded")
+            await page.goto(url, timeout=int(self._request_timeout * 1000), wait_until="domcontentloaded")
             await asyncio.sleep(random.uniform(1.0, 2.5))
             html = await page.content()
 
             if self.captcha_detect_hook(mode="browser", html=html, url=url, page=page):
-                self.log("captcha_detected", mode="browser", url=url)
+                self.log("captcha_detected", level="warning", mode="browser", url=url)
                 solved = await self.captcha_solve_hook(mode="browser", page=page, url=url, proxy=proxies)
                 if not solved:
                     return None
@@ -441,8 +499,8 @@ class AsyncBaseScraper:
                 html = await page.content()
 
             return html
-        return _impl
 
+        return _impl
 
     # --------------------
     # hooks to override in subclasses
@@ -489,7 +547,7 @@ class AsyncBaseScraper:
                     if parsed:
                         matches.extend(parsed)
                 except Exception as e:
-                    self.log("parse_api_failed", error=str(e), endpoint=api_endpoint)
+                    self.log("parse_api_failed", level="error", error=str(e), endpoint=api_endpoint)
 
         # 2) try static HTML
         if not matches:
@@ -502,7 +560,7 @@ class AsyncBaseScraper:
                     if parsed:
                         matches.extend(parsed)
                 except Exception as e:
-                    self.log("parse_html_failed", error=str(e), endpoint=url)
+                    self.log("parse_html_failed", level="error", error=str(e), endpoint=url)
 
         # 3) browser fallback
         if not matches:
@@ -515,7 +573,7 @@ class AsyncBaseScraper:
                     if parsed:
                         matches.extend(parsed)
                 except Exception as e:
-                    self.log("parse_html_failed", error=str(e), endpoint=url)
+                    self.log("parse_html_failed", level="error", error=str(e), endpoint=url)
 
         return matches
 
@@ -523,7 +581,12 @@ class AsyncBaseScraper:
     # observability
     # --------------------
     def metrics_snapshot(self) -> Dict[str, Any]:
-        pool_stats = self.proxy_pool.stats()
+        pool_stats = {}
+        try:
+            pool_stats = self.proxy_pool.stats()
+        except Exception:
+            pool_stats = {}
+
         buckets = {"lt_0_2s": 0, "0_2_0_5s": 0, "0_5_1_0s": 0, "gt_1_0s": 0}
         for d in self.metrics["latency_histogram"]:
             if d < 0.2:
@@ -538,6 +601,7 @@ class AsyncBaseScraper:
         return {
             "bookmaker": self.bookmaker,
             "requests_made": self.metrics["requests_made"],
+            "successful_requests": self.metrics["successful_requests"],
             "failed_requests": self.metrics["failed_requests"],
             "matches_collected": self.metrics["matches_collected"],
             "proxy_success": self.metrics["proxy_success"],
