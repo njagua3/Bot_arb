@@ -89,7 +89,7 @@ def _entry_to_common_shape(entry: Dict[str, Any]) -> Dict[str, Any]:
 
     out = {
         "market_obj": market_obj,
-        "market": market_obj.name,  # always safe
+        "market": market_obj.name,  
         "odds": odds,
         "bookmaker": entry.get("bookmaker", ""),
         "url": entry.get("url") or entry.get("offer_url", ""),

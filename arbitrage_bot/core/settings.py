@@ -2,7 +2,7 @@
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict
 
 # Allow dynamic config file path via environment variable
 SETTINGS_FILE = Path(os.getenv("SETTINGS_FILE", "data/settings.json"))
@@ -17,7 +17,6 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "log_dir": "data",
     "log_file": "arb_log.txt",
     "log_console": True,
-    "scrapers": []  # ✅ default empty list
 }
 
 
@@ -32,8 +31,6 @@ def validate_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
     validated["cache_expiry_minutes"] = int(validated.get("cache_expiry_minutes", DEFAULT_SETTINGS["cache_expiry_minutes"]))
     validated["scan_interval"] = int(validated.get("scan_interval", DEFAULT_SETTINGS["scan_interval"]))
     validated["log_console"] = bool(validated.get("log_console", DEFAULT_SETTINGS["log_console"]))
-    # Ensure scrapers is always a list of tuples
-    validated["scrapers"] = [tuple(x) for x in validated.get("scrapers", [])]
     return validated
 
 
@@ -94,6 +91,5 @@ def set_stake(value: float) -> None:
     set_setting("stake", float(value))
 
 
-# ✅ Export scan interval and scrapers for main.py
+# ✅ Export scan interval for main.py
 SCAN_INTERVAL: int = get_setting("scan_interval", DEFAULT_SETTINGS["scan_interval"])
-SCRAPERS: List[Tuple[str, str]] = get_setting("scrapers", DEFAULT_SETTINGS["scrapers"])

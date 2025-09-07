@@ -1,3 +1,4 @@
+# scrapers/base_scraper.py
 import time
 import json
 import random
@@ -15,6 +16,14 @@ logger.setLevel(logging.INFO)
 _handler = logging.StreamHandler()
 _handler.setFormatter(logging.Formatter("%(message)s"))
 logger.addHandler(_handler)
+
+
+# --- Browser fingerprint profiles ---
+BROWSER_PROFILES = [
+    {"locale": "en-US,en;q=0.9", "width": 1366, "height": 768},
+    {"locale": "en-GB,en;q=0.9", "width": 1920, "height": 1080},
+    {"locale": "de-DE,de;q=0.9", "width": 1440, "height": 900},
+]
 
 
 class BaseScraper:
@@ -82,10 +91,8 @@ class BaseScraper:
             return None
         value, ts = entry
         if time.time() - ts < self.cache_ttl:
-            # lightweight touch: refresh timestamp to keep hot entries warm
             self.cache[key] = (value, time.time())
             return value
-        # expired
         self.cache.pop(key, None)
         return None
 
@@ -94,19 +101,13 @@ class BaseScraper:
 
     # -----------------------------
     # Retry wrapper
-    #   1) Proxy handling per attempt (mark failures immediately, rotate next)
-    #   2) Mark proxy success on good requests
-    #   3) Better logging/metrics
-    #   4) Rotate UA per attempt
     # -----------------------------
     def with_retries(self, func):
         def wrapper(*args, **kwargs):
-            # choose initial proxy, then rotate with .next() on each failure
             proxy = self.proxy_pool.get()
             last_exc = None
 
             for attempt in range(1, self.max_retries + 1):
-                # 4) rotate UA per attempt (per-request headers)
                 ua = self.get_random_user_agent()
                 headers = kwargs.pop("headers", None) or {}
                 headers = {"User-Agent": ua, **headers}
@@ -117,12 +118,10 @@ class BaseScraper:
                         time.sleep(self.sleep_between_requests)
 
                     start = time.perf_counter()
-                    # pass proxies to func (requests expects dict or None)
                     result = func(*args, proxies=proxy, **kwargs)
                     duration = time.perf_counter() - start
 
                     if result is not None:
-                        # 2) success: mark proxy healthy, record latency & metrics
                         if proxy:
                             self.proxy_pool.mark_success(proxy)
                             self.proxy_pool.mark_latency(proxy, duration)
@@ -136,13 +135,11 @@ class BaseScraper:
                         )
                         return result
 
-                    # Treat empty result as soft failure
                     raise RuntimeError("Empty result")
 
                 except Exception as e:
                     last_exc = e
                     self.metrics["failed_requests"] += 1
-                    # 1) mark failed immediately on each failed attempt
                     if proxy:
                         self.proxy_pool.mark_failed(proxy)
 
@@ -154,14 +151,10 @@ class BaseScraper:
                         proxy=proxy["http"] if proxy else None,
                     )
 
-                    # backoff with jitter
                     sleep_for = (2 ** (attempt - 1)) + random.uniform(0, 0.75)
                     time.sleep(sleep_for)
-
-                    # rotate proxy for next attempt
                     proxy = self.proxy_pool.next()
 
-            # All retries exhausted
             self.log(
                 "request_retries_exhausted",
                 level="error",
@@ -213,35 +206,56 @@ class BaseScraper:
         return _impl
 
     # -----------------------------
-    # Browser fallback (Selenium) with lazy import + safe cleanup
+    # Browser fallback (stealth + fingerprint + cookie sync)
     # -----------------------------
     def try_browser(self, url: str, proxies: Optional[Dict[str, str]] = None, use_queue: bool = False) -> Optional[str]:
         if use_queue:
-            # Placeholder: integrate with Celery task queue in tasks.py
             self.log("browser_task_queued", url=url)
             return None
 
-        # Lazy import so environments without selenium don’t break
         try:
-            from selenium import webdriver
-            from selenium.webdriver.chrome.options import Options
+            import undetected_chromedriver as uc
         except Exception as e:
-            self.log("selenium_import_failed", level="error", error=str(e))
+            self.log("uc_import_failed", level="error", error=str(e))
             return None
 
         driver = None
         try:
-            opts = Options()
-            opts.add_argument("--headless=new")
-            opts.add_argument(f"user-agent={self.get_random_user_agent()}")
-            if proxies and "http" in proxies:
-                opts.add_argument(f"--proxy-server={proxies['http']}")
+            profile = random.choice(BROWSER_PROFILES)
+            ua = self.get_random_user_agent()
 
-            driver = webdriver.Chrome(options=opts)
+            options = uc.ChromeOptions()
+            options.add_argument("--headless=new")
+            options.add_argument(f"--window-size={profile['width']},{profile['height']}")
+            options.add_argument(f"user-agent={ua}")
+            options.add_argument(f"--lang={profile['locale']}")
+
+            if proxies and "http" in proxies:
+                options.add_argument(f"--proxy-server={proxies['http']}")
+
+            driver = uc.Chrome(options=options)
             driver.set_page_load_timeout(int(self.request_timeout))
+
+            # Stealth JS injection
+            driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+                "source": """
+                    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                    Object.defineProperty(navigator, 'languages', {get: () => ['en-US','en']});
+                    Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3]});
+                    window.chrome = { runtime: {} };
+                """
+            })
+
             driver.get(url)
-            # small human-like delay to let dynamic content settle
             time.sleep(random.uniform(1.5, 3.0))
+
+            # navigation hooks
+            self.paginate_hook(driver)
+
+            # sync cookies to requests.Session
+            for c in driver.get_cookies():
+                self.session.cookies.set(c["name"], c["value"], domain=c.get("domain"))
+
             html = driver.page_source
             self.log("browser_success", url=url, proxy=proxies["http"] if proxies else None)
             return html
@@ -256,7 +270,6 @@ class BaseScraper:
                 if driver:
                     driver.quit()
             except Exception:
-                # swallow cleanup errors
                 pass
 
     # -----------------------------
@@ -268,8 +281,8 @@ class BaseScraper:
     def handle_cloudflare(self, url):  # placeholder
         return None
 
-    def paginate_hook(self, soup_or_page):
-        return soup_or_page
+    def paginate_hook(self, soup_or_driver):
+        return soup_or_driver
 
     # -----------------------------
     # Normalization helper
@@ -284,7 +297,6 @@ class BaseScraper:
     def get_odds(self, api_endpoint: Optional[str] = None, sport_path: str = "", use_browser: bool = False):
         matches = []
 
-        # 1) Try API
         if api_endpoint:
             data = self.try_api(api_endpoint)
             if data:
@@ -293,7 +305,6 @@ class BaseScraper:
                 except Exception as e:
                     self.log("parse_api_failed", level="error", error=str(e))
 
-        # 2) Try static HTML
         if not matches:
             url = f"{self.base_url}{sport_path}"
             soup = self.try_static_html(url)
@@ -304,7 +315,6 @@ class BaseScraper:
                 except Exception as e:
                     self.log("parse_html_failed", level="error", error=str(e))
 
-        # 3) Browser fallback
         if not matches and use_browser:
             url = f"{self.base_url}{sport_path}"
             html = self.try_browser(url)
@@ -343,3 +353,10 @@ class BaseScraper:
     # To be implemented by subclasses
     def parse_api(self, data): return []
     def parse_html(self, soup): return []
+
+    def metrics_snapshot(self) -> dict:
+        """
+        Return a shallow copy of current metrics.
+        Matches AsyncBaseScraper contract.
+        """
+        return dict(self.metrics)

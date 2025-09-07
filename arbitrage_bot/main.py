@@ -1,60 +1,33 @@
 # main.py
-import time, signal, sys, threading, concurrent.futures
-from core.settings import load_stake, SCAN_INTERVAL, SCRAPERS
+import time, signal, sys, threading
+from core.settings import load_stake, SCAN_INTERVAL
 from core.logger import log_error, log_info
 from core.cache import Cache
 from core.arbitrage import ArbitrageFinder
 from core.telegram import run_bot
 from core.db import init_db
-from importlib import import_module
 
+# 👇 new imports
+from scrapers.scraper_loader import discover_scrapers
+from scrapers.orchestrator import Orchestrator
 
 cache = Cache()
 arb_finder = ArbitrageFinder()
-
-
-def load_scrapers():
-    """Dynamically import scrapers defined in settings.json with validation."""
-    scrapers = []
-    for name, path in SCRAPERS:
-        try:
-            module_name, func_name = path.rsplit(".", 1)
-            module = import_module(module_name)
-
-            if not hasattr(module, func_name):
-                log_error(f"⚠️ Scraper '{name}' missing function '{func_name}' in {module_name}")
-                continue
-
-            scraper_func = getattr(module, func_name)
-            scrapers.append(scraper_func)
-            log_info(f"✅ Loaded scraper: {name} ({path})")
-
-        except ModuleNotFoundError:
-            log_error(f"⚠️ Scraper '{name}' skipped: module '{module_name}' not found")
-        except Exception as e:
-            log_error(f"⚠️ Scraper '{name}' skipped due to error: {e}")
-    return scrapers
 
 
 def run_check():
     total_stake = load_stake()
     log_info("🔍 Scanning for arbitrage opportunities...")
 
-    all_entries = []
-    scrapers = load_scrapers()
-
+    # 🔎 auto-discover scrapers in scrapers/
+    scrapers = discover_scrapers()
     if not scrapers:
-        log_error("❌ No valid scrapers loaded! Check your settings.json")
+        log_error("❌ No valid scrapers discovered!")
         return
 
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = {executor.submit(scraper): scraper.__name__ for scraper in scrapers}
-        for future in concurrent.futures.as_completed(futures):
-            scraper_name = futures[future]
-            try:
-                all_entries.extend(future.result())
-            except Exception as e:
-                log_error(f"❌ Error in scraper {scraper_name}: {e}")
+    # 🎯 orchestrator runs all scrapers (async/sync handled internally)
+    orch = Orchestrator(scrapers)
+    all_entries = orch.run_cycle()
 
     alerts_sent = arb_finder.scan_and_alert(all_entries)
     log_info(f"📨 Alerts sent: {alerts_sent}")

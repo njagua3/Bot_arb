@@ -32,10 +32,9 @@ logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
 
-class AsyncBaseScraper:
-    """
+class AsyncBaseScraper:\n    """
     Async scraper with:
-      - User-Agent rotation on every retry
+      - User-Agent rotation on every retry (UA ↔ Context sync)
       - rate limiting (shared semaphore or per-instance)
       - per-endpoint circuit breaker
       - retries with exponential backoff + jitter
@@ -43,15 +42,35 @@ class AsyncBaseScraper:
       - httpx AsyncClient (lazy)
       - Playwright lifecycle with proxy-bound context cache
       - structured logging + metrics snapshot
+      - stealth + fingerprint rotation per proxy
+      - browser<->httpx cookie syncing
+      - mobile UA pairing for viewport/profile
     """
 
     CONTEXT_TTL_SEC: int = 180
     CONTEXT_CACHE_MAX: int = 6
 
     USER_AGENTS = [
+        # Desktop
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0 Safari/537.36",
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Safari/605.1.15",
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0 Safari/537.36",
+        # Mobile (for pairing logic)
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
+        "Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0 Mobile Safari/537.36",
+    ]
+
+    # ---- Fingerprint bundles we rotate per-proxy key ----
+    BROWSER_PROFILES: List[Dict[str, Any]] = [
+        # Desktop Chrome-like, US/EU/Africa variants
+        {"locale": "en-US", "timezone_id": "America/New_York", "viewport": {"width": 1366, "height": 768}},
+        {"locale": "en-US", "timezone_id": "America/Los_Angeles", "viewport": {"width": 1440, "height": 900}},
+        {"locale": "en-GB", "timezone_id": "Europe/London", "viewport": {"width": 1920, "height": 1080}},
+        {"locale": "de-DE", "timezone_id": "Europe/Berlin", "viewport": {"width": 1536, "height": 864}},
+        {"locale": "en-KE", "timezone_id": "Africa/Nairobi", "viewport": {"width": 1600, "height": 900}},
+        # Mobile-ish profiles (flagged mobile=True)
+        {"locale": "en-US", "timezone_id": "America/Chicago", "viewport": {"width": 390, "height": 844}, "mobile": True},
+        {"locale": "en-US", "timezone_id": "America/New_York", "viewport": {"width": 412, "height": 915}, "mobile": True},
     ]
 
     def __init__(self,
@@ -88,6 +107,9 @@ class AsyncBaseScraper:
 
         # context cache (per-proxy)
         self._context_cache: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+        # store the profile and UA used for each context key
+        self._context_profiles: Dict[str, Dict[str, Any]] = {}
+        self._context_ua: Dict[str, str] = {}
 
         # metrics
         self.metrics = {
@@ -151,11 +173,13 @@ class AsyncBaseScraper:
             except Exception as e:
                 self.log("context_close_failed", level="warning", context_key=key, error=str(e))
         self._context_cache.clear()
+        self._context_profiles.clear()
+        self._context_ua.clear()
 
         # close browser
         if self._browser:
             try:
-                await self._browser.close()
+                self._browser and await self._browser.close()
                 self.log("browser_closed")
             except Exception as e:
                 self.log("browser_close_failed", level="warning", error=str(e))
@@ -178,9 +202,6 @@ class AsyncBaseScraper:
     def log(self, event: str, level: str = "info", **kwargs):
         msg = {"event": event, "bookmaker": self.bookmaker, **kwargs}
         getattr(logger, level)(json.dumps(msg))
-
-    # (rest of your code stays identical: retries, circuit breaker, try_api, try_html, try_browser, hooks, metrics…)
-
 
     # --------------------
     # rate limiting helper
@@ -239,7 +260,7 @@ class AsyncBaseScraper:
             self.log("circuit_opened", level="warning", endpoint=key, fail_count=r["fail_count"])
 
     # --------------------
-    # retry wrapper (with UA rotation)
+    # retry wrapper (with UA ↔ Context sync)
     # --------------------
     def with_retries(
         self,
@@ -252,11 +273,9 @@ class AsyncBaseScraper:
     ):
         """
         Decorator for async coroutine functions.
-        - retry_on: exception classes to retry
-        - max_retries: override (falls back to self.default_max_retries)
-        - backoff_base: base seconds for exponential backoff
-        - jitter: multiplicative jitter range
-        - on_retry: optional callback (attempt, exc, cb_key)
+        - Rotates UA per attempt and syncs to httpx headers
+        - If a browser context is requested after UA change, _get_browser_context
+          will transparently rebuild it so UA & context stay aligned (per-proxy key).
         """
 
         async def wrapped(*args, **kwargs):
@@ -275,10 +294,14 @@ class AsyncBaseScraper:
             for attempt in range(1, local_max_retries + 1):
                 try:
                     # --- rotate UA for this attempt ---
+                    old_ua = self.ua
                     self.ua = random.choice(self.USER_AGENTS)
                     if self.client:
                         # update client header for this attempt
                         self.client.headers.update({"User-Agent": self.ua})
+
+                    # Mark all cached contexts whose UA ≠ current as stale; they will auto-recreate on demand
+                    # (We don't eagerly close here to avoid thrashing; _get_browser_context enforces UA match.)
 
                     await self._acquire_rate_slot()
                     start = time.perf_counter()
@@ -310,6 +333,7 @@ class AsyncBaseScraper:
                             attempt=attempt,
                             duration_ms=int(duration * 1000),
                             proxy=proxy["http"] if proxy else None,
+                            ua=self.ua,
                         )
                         return result
 
@@ -333,6 +357,7 @@ class AsyncBaseScraper:
                         error=str(e),
                         endpoint=cb_key,
                         proxy=proxy["http"] if proxy else None,
+                        ua=self.ua,
                     )
                     if on_retry:
                         try:
@@ -351,7 +376,7 @@ class AsyncBaseScraper:
                     # non-retryable error: break and record
                     last_exc = e
                     self.metrics["failed_requests"] += 1
-                    self.log("request_error", level="error", error=str(e), endpoint=cb_key)
+                    self.log("request_error", level="error", error=str(e), endpoint=cb_key, ua=self.ua)
                     break
 
             # exhausted retries
@@ -363,19 +388,135 @@ class AsyncBaseScraper:
         return wrapped
 
     # --------------------
-    # Playwright context cache (per-proxy contexts)
+    # Stronger Stealth injection
+    # --------------------
+    async def _apply_stealth(self, context):
+        """
+        Apply stronger stealth to the given context.
+        - hides navigator.webdriver
+        - fakes languages/plugins/mimeTypes
+        - patches permissions.query for notifications
+        - ensures window.chrome & chrome.runtime
+        - hairline fix (stabilize devicePixelRatio usage)
+        - basic WebGL vendor/renderer fallback guards (non-invasive)
+        """
+        # languages: prefer profile locale if available
+        key = None
+        for k, v in self._context_cache.items():
+            if v["context"] == context:
+                key = k
+                break
+        langs = ["en-US", "en"]
+        if key and key in self._context_profiles:
+            locale = self._context_profiles[key].get("locale", "en-US")
+            base = locale.split("-")[0]
+            langs = [locale, base]
+
+        js = f"""
+(() => {{
+  try {{
+    // webdriver
+    Object.defineProperty(navigator, 'webdriver', {{ get: () => undefined }});
+
+    // languages
+    Object.defineProperty(navigator, 'languages', {{ get: () => {json.dumps(langs)} }});
+
+    // plugins & mimeTypes (non-empty)
+    const fakePlugin = {{ name: 'Chrome PDF Plugin' }};
+    const fakeMime = {{ type: 'application/pdf', suffixes: 'pdf', description: '' }};
+    const pluginArray = [fakePlugin, {{ name: 'Chrome PDF Viewer' }}, {{ name: 'Native Client' }}];
+    const mimeArray = [fakeMime, {{ type: 'application/x-google-chrome-pdf', suffixes: 'pdf', description: '' }}];
+    Object.defineProperty(navigator, 'plugins', {{ get: () => pluginArray }});
+    Object.defineProperty(navigator, 'mimeTypes', {{ get: () => mimeArray }});
+
+    // permissions.query patch for notifications
+    const origQuery = window.navigator.permissions && window.navigator.permissions.query;
+    if (origQuery) {{
+      window.navigator.permissions.query = (parameters) => (
+        parameters && parameters.name === 'notifications'
+          ? Promise.resolve({{ state: Notification.permission }})
+          : origQuery(parameters)
+      );
+    }}
+
+    // window.chrome & chrome.runtime shim
+    if (!window.chrome) {{ window.chrome = {{ runtime: {{}} }}; }}
+    else if (!window.chrome.runtime) {{ window.chrome.runtime = {{}}; }}
+
+    // Hairline / DPR stabilization
+    try {{
+      const dpr = window.devicePixelRatio || 1;
+      Object.defineProperty(window, 'devicePixelRatio', {{ get: () => dpr }});
+      // Force 1px hairline to render consistently
+      const setHairline = () => {{
+        const el = document.createElement('div');
+        el.style.border = '0.5px solid transparent';
+        document.documentElement.appendChild(el);
+        el.remove();
+      }};
+      if (document.readyState === 'loading') {{
+        document.addEventListener('DOMContentLoaded', setHairline);
+      }} else {{ setHairline(); }}
+    }} catch (e) {{}}
+
+    // Basic WebGL vendor/renderer guards (avoid null fingerprints)
+    try {{
+      const getContext = HTMLCanvasElement.prototype.getContext;
+      HTMLCanvasElement.prototype.getContext = function(type, attrs) {{
+        const ctx = getContext.apply(this, [type, attrs]);
+        return ctx;
+      }}
+    }} catch (e) {{}}
+  }} catch (e) {{}}
+}})();
+"""
+        await context.add_init_script(js)
+
+    # --------------------
+    # Cookie sync
+    # --------------------
+    async def _sync_cookies_to_httpx(self, context):
+        """
+        Pull cookies from the Playwright context and load them into httpx client.
+        Keeps API calls aligned with the current browser session.
+        """
+        if not self.client:
+            return
+        try:
+            pcookies = await context.cookies()
+            for c in pcookies:
+                # httpx Cookies.set(name, value, domain=..., path=..., secure=..., expires=...)
+                params = {}
+                if c.get("domain"):
+                    params["domain"] = c["domain"]
+                if c.get("path"):
+                    params["path"] = c["path"]
+                if c.get("expires"):
+                    params["expires"] = int(c["expires"])
+                if c.get("secure") is not None:
+                    params["secure"] = bool(c["secure"])
+                self.client.cookies.set(c["name"], c.get("value", ""), **params)
+            self.log("cookies_synced_to_httpx", count=len(pcookies))
+        except Exception as e:
+            self.log("cookies_sync_failed", level="warning", error=str(e))
+
+    # --------------------
+    # Playwright context cache (per-proxy contexts) with UA ↔ Context sync
     # --------------------
     async def _get_browser_context(self, proxy: Optional[Dict[str, str]]):
         """
         Reuse a context per proxy for speed; respects TTL and LRU eviction.
+        Rotates fingerprint (locale/timezone/viewport) and stealth-injects on creation.
         Key is proxy["http"] or "direct".
+        Ensures the context UA matches current self.ua. If not, it rebuilds the context.
+        Also pairs mobile UA with a mobile profile/viewport when available.
         """
         key = proxy["http"] if proxy else "direct"
         now = time.time()
 
         # prune expired entries
         to_delete = []
-        for k, cached in self._context_cache.items():
+        for k, cached in list(self._context_cache.items()):
             if now - cached["created_at"] >= self.CONTEXT_TTL_SEC:
                 to_delete.append(k)
         for k in to_delete:
@@ -384,12 +525,38 @@ class AsyncBaseScraper:
             except Exception:
                 pass
             self._context_cache.pop(k, None)
+            self._context_profiles.pop(k, None)
+            self._context_ua.pop(k, None)
 
-        # return cached (and mark as recently used)
+        # Helper: choose a profile, with mobile pairing if UA looks mobile
+        def pick_profile() -> Dict[str, Any]:
+            ua = self.ua or ""
+            is_mobile = ("Mobile" in ua) or ("iPhone" in ua) or ("Android" in ua)
+            if is_mobile:
+                mobiles = [p for p in self.BROWSER_PROFILES if p.get("mobile")]
+                if mobiles:
+                    return random.choice(mobiles)
+            # fallback to any desktop profile
+            desktops = [p for p in self.BROWSER_PROFILES if not p.get("mobile")]
+            return random.choice(desktops) if desktops else random.choice(self.BROWSER_PROFILES)
+
+        # If cached exists but UA mismatches, or cached is missing, (re)create
         cached = self._context_cache.get(key)
-        if cached:
+        cached_ua = self._context_ua.get(key)
+        if cached and cached_ua == self.ua:
+            # still valid; mark as recently used and return
             self._context_cache.move_to_end(key)
             return cached["context"]
+
+        # close old if present
+        if cached:
+            try:
+                await cached["context"].close()
+            except Exception:
+                pass
+            self._context_cache.pop(key, None)
+            self._context_profiles.pop(key, None)
+            self._context_ua.pop(key, None)
 
         # enforce LRU limit
         while len(self._context_cache) >= self.CONTEXT_CACHE_MAX:
@@ -398,16 +565,38 @@ class AsyncBaseScraper:
                 await old_val["context"].close()
             except Exception:
                 pass
+            self._context_profiles.pop(old_key, None)
+            self._context_ua.pop(old_key, None)
 
         if not self._browser:
             raise RuntimeError("Browser not initialized. Use `async with scraper:`")
 
-        # Use current UA when creating context
+        # pick and store a fingerprint profile for this key
+        profile = pick_profile()
+        self._context_profiles[key] = profile
+
+        # align Accept-Language header to profile for subsequent httpx requests
+        if self.client:
+            try:
+                al = f"{profile['locale']},{profile['locale'].split('-')[0]};q=0.9"
+                self.client.headers.update({"Accept-Language": al})
+            except Exception:
+                pass
+
+        # Use current UA when creating context + profile settings
         context = await self._browser.new_context(
             user_agent=self.ua,
             proxy={"server": proxy["http"]} if proxy else None,
+            locale=profile.get("locale"),
+            timezone_id=profile.get("timezone_id"),
+            viewport=profile.get("viewport"),
         )
+
+        # Inject stealth before any pages are created
+        await self._apply_stealth(context)
+
         self._context_cache[key] = {"context": context, "created_at": now}
+        self._context_ua[key] = self.ua
         return context
 
     # --------------------
@@ -460,6 +649,10 @@ class AsyncBaseScraper:
             Browser fetch. If `self.offload_browser` is truthy we will schedule a Celery
             task (run_playwright_task) and await its result using asyncio.to_thread
             so we don't block the event loop.
+            Also:
+              - applies stealth via context factory
+              - runs paginate_hook(Page) for infinite scroll / click-to-load
+              - syncs cookies from browser -> httpx
             """
             offload = getattr(self, "offload_browser", False)
             proxy_server = None
@@ -467,7 +660,6 @@ class AsyncBaseScraper:
                 proxy_server = proxies.get("http") or proxies.get("https")
 
             if offload:
-                # dispatch Celery task and wait in a thread
                 try:
                     async_result = run_playwright_task.delay(url, self.ua, proxy_server, kwargs.get("timeout", 20))
                     def wait_result():
@@ -475,12 +667,13 @@ class AsyncBaseScraper:
                     html = await asyncio.to_thread(wait_result)
                     if not html:
                         return None
+                    # No cookie sync available from offloaded process
                     return html
                 except Exception as e:
                     self.log("playwright_offload_failed", level="error", error=str(e), url=url)
                     return None
 
-            # fallback to local Playwright path
+            # local Playwright path
             if not self._browser:
                 raise RuntimeError("Browser not initialized. Use `async with scraper:`")
 
@@ -488,16 +681,30 @@ class AsyncBaseScraper:
             page = await context.new_page()
             await page.goto(url, timeout=int(self._request_timeout * 1000), wait_until="domcontentloaded")
             await asyncio.sleep(random.uniform(1.0, 2.5))
-            html = await page.content()
 
+            # optional captcha handling prior to pagination
+            html = await page.content()
             if self.captcha_detect_hook(mode="browser", html=html, url=url, page=page):
                 self.log("captcha_detected", level="warning", mode="browser", url=url)
                 solved = await self.captcha_solve_hook(mode="browser", page=page, url=url, proxy=proxies)
                 if not solved:
+                    await page.close()
                     return None
                 await asyncio.sleep(0.8)
-                html = await page.content()
 
+            # --- Run pagination hook on the Page (subclasses can scroll/click here) ---
+            try:
+                await self.paginate_hook(page)  # subclasses decide how to act on Page
+            except Exception as e:
+                self.log("paginate_hook_failed", level="warning", error=str(e), endpoint=url)
+
+            # read final HTML after pagination
+            html = await page.content()
+
+            # --- Sync cookies from browser to httpx ---
+            await self._sync_cookies_to_httpx(context)
+
+            await page.close()
             return html
 
         return _impl
@@ -506,6 +713,12 @@ class AsyncBaseScraper:
     # hooks to override in subclasses
     # --------------------
     async def paginate_hook(self, soup_or_page):
+        """
+        Override in subclasses.
+        - If called from static HTML path: receives BeautifulSoup, return soup (optionally transformed).
+        - If called from browser path: receives Playwright Page; you can infinite-scroll or click-to-load and return None.
+          (The base implementation is a no-op and simply returns the original object.)
+        """
         return soup_or_page
 
     def captcha_detect_hook(self, mode: str, **ctx) -> bool:
@@ -610,3 +823,42 @@ class AsyncBaseScraper:
             "latency_buckets": buckets,
             "proxy_pool": pool_stats,
         }
+
+    # --------------------
+    # contract compatibility with BaseScraper
+    # --------------------
+    supports_browser_fallback: bool = True
+
+    async def get_multiple_odds(
+        self,
+        api_endpoints: Optional[List[str]] = None,
+        sport_paths: Optional[List[str]] = None,
+    ) -> List[dict]:
+        """
+        Batch wrapper around get_odds().
+        - Same contract as BaseScraper.get_multiple_odds
+        - Returns a flat list of matches across all endpoints/paths
+        """
+        results: List[dict] = []
+
+        api_endpoints = api_endpoints or []
+        sport_paths = sport_paths or []
+
+        # Run them concurrently for efficiency
+        tasks = []
+
+        for api in api_endpoints:
+            tasks.append(self.get_odds(api_endpoint=api))
+
+        for path in sport_paths:
+            tasks.append(self.get_odds(sport_path=path))
+
+        gathered = await asyncio.gather(*tasks, return_exceptions=True)
+        for res in gathered:
+            if isinstance(res, Exception):
+                self.log("get_multiple_odds_failed", level="error", error=str(res))
+                continue
+            if res:
+                results.extend(res)
+
+        return results
