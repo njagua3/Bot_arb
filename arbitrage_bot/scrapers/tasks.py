@@ -158,17 +158,24 @@ def run_playwright_task(url: str, user_agent: str, proxy: Optional[str] = None, 
     browser = None
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            context_kwargs = {"user_agent": user_agent}
+            launch_kwargs = {"headless": True}
             if proxy:
-                context_kwargs["proxy"] = {"server": proxy}
+                launch_kwargs["proxy"] = {"server": proxy}
+            browser = p.chromium.launch(**launch_kwargs)
+
+            context_kwargs = {"user_agent": user_agent}
             context = browser.new_context(**context_kwargs)
+
             page = context.new_page()
             page.goto(url, timeout=timeout * 1000)
-            return _wrap_browser_result("OK", page.content(), proxy)
+
+            html = page.content()
+            return _wrap_browser_result("OK", html, proxy)
+
     except Exception:
         logger.exception("Playwright task failed")
         return _wrap_browser_result("ERROR", None, proxy)
+
     finally:
         if browser:
             try:
@@ -194,7 +201,17 @@ def process_fallback_html(result: dict, scraper_module: str, scraper_class: str,
     try:
         module = importlib.import_module(scraper_module)
         cls = getattr(module, scraper_class)
-        scraper = cls()
+
+        # ---- Smart init logic ----
+        params = inspect.signature(cls).parameters
+        if "proxy_list" in params:
+            scraper = cls(proxy_list=[proxy] if proxy else [])
+        elif "proxy" in params:
+            scraper = cls(proxy=proxy)
+        else:
+            scraper = cls()
+        # --------------------------
+
         soup = BeautifulSoup(html, "html.parser")
 
         parsed = scraper.parse_html(soup) if not inspect.iscoroutinefunction(scraper.parse_html) \
@@ -225,7 +242,6 @@ def process_fallback_html(result: dict, scraper_module: str, scraper_class: str,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
-
 # ---------- Main Scraper ----------
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=5, queue="default")
 def run_scraper_task(self, scraper_module: str, scraper_class: str, proxy_pool: Optional[list] = None,
@@ -246,7 +262,17 @@ def run_scraper_task(self, scraper_module: str, scraper_class: str, proxy_pool: 
         # Load scraper
         module = importlib.import_module(scraper_module)
         cls = getattr(module, scraper_class)
-        scraper = cls(proxy=proxy) if "proxy" in inspect.signature(cls).parameters else cls()
+
+        # ---- Smart init logic (prefer proxy_list > proxy > none) ----
+        params = inspect.signature(cls).parameters
+        if "proxy_list" in params:
+            scraper = cls(proxy_list=[proxy] if proxy else [])
+        elif "proxy" in params:
+            scraper = cls(proxy=proxy)
+        else:
+            scraper = cls()
+        # ------------------------------------------------------------
+
         bookmaker = getattr(scraper, "bookmaker", scraper_class)
 
         logger.info(json.dumps({
@@ -269,6 +295,16 @@ def run_scraper_task(self, scraper_module: str, scraper_class: str, proxy_pool: 
 
         if not result:
             logger.warning(json.dumps({"event": "zero_matches", "bookmaker": bookmaker}))
+
+        # --- Push detailed scraper metrics if available ---
+        try:
+            if hasattr(scraper, "metrics_snapshot"):
+                metrics = scraper.metrics_snapshot()
+                for k, v in metrics.items():
+                    if isinstance(v, (int, float)):
+                        _record_metric(k, bookmaker, int(v))
+        except Exception:
+            logger.warning(json.dumps({"event": "metrics_snapshot_failed", "bookmaker": bookmaker}))
 
         return {
             "status": "OK",
