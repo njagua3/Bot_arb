@@ -32,7 +32,8 @@ logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
 
-class AsyncBaseScraper:\n    """
+class AsyncBaseScraper:   
+"""
     Async scraper with:
       - User-Agent rotation on every retry (UA ↔ Context sync)
       - rate limiting (shared semaphore or per-instance)
