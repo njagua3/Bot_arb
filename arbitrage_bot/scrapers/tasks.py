@@ -83,9 +83,19 @@ def _metric_key(bookmaker: str, metric: str) -> str:
 def _record_metric(metric: str, bookmaker: str, value: int = 1):
     try:
         redis_client.incrby(_metric_key(bookmaker, metric), value)
-        logger.info(json.dumps({"event": "metric_recorded", "bookmaker": bookmaker, "metric": metric, "value": value}))
+        logger.info(json.dumps({
+            "event": "metric_recorded",
+            "bookmaker": bookmaker,
+            "metric": metric,
+            "value": value
+        }))
     except Exception as e:
-        logger.warning(json.dumps({"event": "metric_failed", "bookmaker": bookmaker, "metric": metric, "error": str(e)}))
+        logger.warning(json.dumps({
+            "event": "metric_failed",
+            "bookmaker": bookmaker,
+            "metric": metric,
+            "error": str(e)
+        }))
 
 
 # ---------- Blacklist ----------
@@ -242,6 +252,7 @@ def process_fallback_html(result: dict, scraper_module: str, scraper_class: str,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
+
 # ---------- Main Scraper ----------
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=5, queue="default")
 def run_scraper_task(self, scraper_module: str, scraper_class: str, proxy_pool: Optional[list] = None,
@@ -283,8 +294,13 @@ def run_scraper_task(self, scraper_module: str, scraper_class: str, proxy_pool: 
             "proxy": proxy,
         }))
 
-        # Execute scraper
-        result = safe_async_run(scraper.get_odds()) if getattr(scraper, "is_async", False) else scraper.get_odds()
+        # Execute scraper (supports get_multiple_odds + async)
+        if hasattr(scraper, "get_multiple_odds"):
+            result = safe_async_run(scraper.get_multiple_odds()) if getattr(scraper, "is_async", False) \
+                else scraper.get_multiple_odds()
+        else:
+            result = safe_async_run(scraper.get_odds()) if getattr(scraper, "is_async", False) \
+                else scraper.get_odds()
 
         if not isinstance(result, list):
             raise ValueError("Invalid scraper result (expected list)")

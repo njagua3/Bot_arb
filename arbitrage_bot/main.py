@@ -1,5 +1,5 @@
 # main.py
-import time, signal, sys, threading
+import time, signal, sys, threading, traceback
 from core.settings import load_stake, SCAN_INTERVAL
 from core.logger import log_error, log_info
 from core.cache import Cache
@@ -7,27 +7,63 @@ from core.arbitrage import ArbitrageFinder
 from core.telegram import run_bot
 from core.db import init_db
 
-# 👇 new imports
+# 👇 scrapers
 from scrapers.scraper_loader import discover_scrapers
-from scrapers.orchestrator import Orchestrator
+from scrapers.orchestrator import ScraperOrchestrator
+from scrapers.base_scraper import BaseScraper
+from scrapers.async_base_scraper import AsyncBaseScraper
+import asyncio
 
 cache = Cache()
 arb_finder = ArbitrageFinder()
+
+
+def run_scrapers_fallback(scrapers):
+    """
+    Run scrapers directly (synchronously/asynchronously) without Celery.
+    """
+    all_entries = []
+    for scraper in scrapers:
+        try:
+            if isinstance(scraper, BaseScraper):
+                entries = scraper.get_odds()
+            elif isinstance(scraper, AsyncBaseScraper):
+                entries = asyncio.run(scraper.get_odds())
+            else:
+                log_error(f"❌ Unknown scraper type: {type(scraper)}")
+                continue
+
+            if entries:
+                all_entries.extend(entries)
+                log_info(f"✅ Fallback: {scraper.bookmaker} returned {len(entries)} entries.")
+            else:
+                log_info(f"⚠️ Fallback: {scraper.bookmaker} returned no entries.")
+        except Exception as e:
+            log_error(f"❌ Fallback scraper {scraper.bookmaker} failed: {e}")
+            traceback.print_exc()
+    return all_entries
 
 
 def run_check():
     total_stake = load_stake()
     log_info("🔍 Scanning for arbitrage opportunities...")
 
-    # 🔎 auto-discover scrapers in scrapers/
     scrapers = discover_scrapers()
     if not scrapers:
         log_error("❌ No valid scrapers discovered!")
         return
 
-    # 🎯 orchestrator runs all scrapers (async/sync handled internally)
-    orch = Orchestrator(scrapers)
-    all_entries = orch.run_cycle()
+    all_entries = []
+    try:
+        # 🎯 Primary: Celery orchestrator
+        orch = ScraperOrchestrator(scrapers)
+        result = orch.run()
+        all_entries = result.get("matches", [])
+        log_info("✅ Scrapers executed via Celery Orchestrator.")
+    except Exception as e:
+        # 🚨 Fallback mode
+        log_error(f"⚠️ Orchestrator failed ({e}), falling back to direct execution.")
+        all_entries = run_scrapers_fallback(scrapers)
 
     alerts_sent = arb_finder.scan_and_alert(all_entries)
     log_info(f"📨 Alerts sent: {alerts_sent}")
