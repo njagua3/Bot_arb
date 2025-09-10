@@ -52,13 +52,13 @@ def normalize_market_name(raw: str) -> Market:
     # -----------------------------
     # 1X2 / Full time result
     # -----------------------------
-    if market in ["1x2", "full time result", "result", "ft result", "match odds"]:
+    if market in ["1x2", "full time result", "result", "ft result", "match odds", "ft", "fulltime"]:
         return BASE_MARKETS["1X2"]
 
     # -----------------------------
     # Match Winner (2-way, no draw)
     # -----------------------------
-    if market in ["match winner", "moneyline", "to win"]:
+    if market in ["match winner", "moneyline", "to win", "ml"]:
         return BASE_MARKETS["MATCH WINNER"]
 
     # -----------------------------
@@ -81,20 +81,20 @@ def normalize_market_name(raw: str) -> Market:
 
     # -----------------------------
     # Handicap / Asian Handicap
-    # e.g. "AHC +1.5", "asian handicap -1", "handicap +2"
+    # e.g. "AHC +1.5", "asian handicap -1", "handicap +2", "handicap -0.25"
     # -----------------------------
-    hc_match = re.search(r"(ahc|handicap|asian)[^\d+-]*([+-]?\d+(?:\.\d)?)", market)
+    hc_match = re.search(r"(ahc|handicap|asian)[^\d+-]*([+-]?\d+(?:\.\d+)?)", market)
     if hc_match:
         param = float(hc_match.group(2))
         return Market(f"Handicap {param}", ["Home", "Away"], "2-way", param)
 
     # -----------------------------
     # Over/Under
-    # e.g. "Over 2.5", "O2.5", "Under1.5"
+    # e.g. "Over 2.5", "O2.5", "Under1.5", "Total Goals Over 2.25"
     # -----------------------------
-    ou_match = re.search(r"\b(o|over|u|under)[^\d]*(\d+(?:\.\d)?)", market)
+    ou_match = re.search(r"(total\s*goals\s*)?(o|over|u|under)[^\d]*(\d+(?:\.\d+)?)", market)
     if ou_match:
-        param = float(ou_match.group(2))
+        param = float(ou_match.group(3))
         return Market(
             f"Over/Under {param}",
             [f"Over {param}", f"Under {param}"],
