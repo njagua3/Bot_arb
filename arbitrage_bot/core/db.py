@@ -1,14 +1,20 @@
-import sqlite3
-import pymysql
-from contextlib import contextmanager
-from datetime import datetime, timedelta
-from sqlalchemy.engine.url import make_url
-from core.config import DB_URL
+# core/db.py
+from __future__ import annotations
 import json
+import sqlite3
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-# ================================================================
-# DATABASE URL PARSING
-# ================================================================
+import pymysql
+from sqlalchemy.engine.url import make_url
+
+from core.config import ENVCFG
+
+# =========================================================
+# DB CONNECTION
+# =========================================================
+DB_URL = ENVCFG.effective_db_url()
 url = make_url(DB_URL)
 
 
@@ -17,14 +23,16 @@ def _is_sqlite() -> bool:
 
 
 def _conn():
-    """
-    Create a connection to MySQL or SQLite depending on DB_URL.
-    """
     if _is_sqlite():
         con = sqlite3.connect(url.database, detect_types=sqlite3.PARSE_DECLTYPES)
         con.row_factory = sqlite3.Row
+        # speed tweaks for local sqlite
+        con.execute("PRAGMA journal_mode=WAL;")
+        con.execute("PRAGMA synchronous=NORMAL;")
+        con.execute("PRAGMA foreign_keys=ON;")
         return con
-    return pymysql.connect(
+
+    con = pymysql.connect(
         host=url.host or "localhost",
         port=url.port or 3306,
         user=url.username,
@@ -34,10 +42,11 @@ def _conn():
         cursorclass=pymysql.cursors.DictCursor,
         autocommit=False,
     )
+    # Force UTC for the session so DATETIME/TIMESTAMP comparisons match your UTC params
+    with con.cursor() as cur:
+        cur.execute("SET time_zone = '+00:00'")
+    return con
 
-
-def get_connection():
-    return _conn()
 
 
 @contextmanager
@@ -55,345 +64,498 @@ def get_cursor(commit: bool = True):
         con.close()
 
 
-# ================================================================
-# SCHEMA INITIALIZATION
-# ================================================================
-def init_db():
-    """
-    Initialize schema including opportunities and housekeeping.
-    """
-    is_sqlite = _is_sqlite()
-    json_type = "TEXT" if is_sqlite else "JSON"
-    pk = "INTEGER PRIMARY KEY AUTOINCREMENT" if is_sqlite else "INT AUTO_INCREMENT PRIMARY KEY"
+def _ph() -> str:
+    return "?" if _is_sqlite() else "%s"
+
+
+def _utcnow() -> datetime:
+    return datetime.now(tz=timezone.utc)
+
+
+def _first_id(row):
+    if not row:
+        return None
+    return row[0] if isinstance(row, tuple) else row.get("id")
+
+
+# =========================================================
+# INIT SCHEMA (+ gentle migrations)
+# =========================================================
+def init_db() -> None:
+    pk = "INTEGER PRIMARY KEY AUTOINCREMENT" if _is_sqlite() else "INT AUTO_INCREMENT PRIMARY KEY"
+    ts = "DATETIME" if _is_sqlite() else "TIMESTAMP"
 
     ddl = [
-        f"""CREATE TABLE IF NOT EXISTS teams (
+        f"""CREATE TABLE IF NOT EXISTS sports (
             id {pk},
-            name VARCHAR(255) UNIQUE
+            name VARCHAR(255) NOT NULL UNIQUE
         )""",
         f"""CREATE TABLE IF NOT EXISTS bookmakers (
             id {pk},
-            name VARCHAR(255) UNIQUE,
+            name VARCHAR(255) NOT NULL UNIQUE,
             url VARCHAR(1024)
+        )""",
+        f"""CREATE TABLE IF NOT EXISTS teams (
+            id {pk},
+            name VARCHAR(255) NOT NULL UNIQUE
+        )""",
+        f"""CREATE TABLE IF NOT EXISTS team_aliases (
+            id {pk},
+            team_id INT NOT NULL,
+            alias VARCHAR(255) NOT NULL UNIQUE,
+            FOREIGN KEY(team_id) REFERENCES teams(id) ON DELETE CASCADE
+        )""",
+        f"""CREATE TABLE IF NOT EXISTS arb_events (
+            id {pk},
+            sport_id INT NOT NULL,
+            competition_name VARCHAR(255),
+            category VARCHAR(255),
+            start_time {ts},
+            home_team_id INT NOT NULL,
+            away_team_id INT NOT NULL,
+            UNIQUE(sport_id, home_team_id, away_team_id, start_time),
+            FOREIGN KEY(sport_id) REFERENCES sports(id) ON DELETE CASCADE,
+            FOREIGN KEY(home_team_id) REFERENCES teams(id) ON DELETE CASCADE,
+            FOREIGN KEY(away_team_id) REFERENCES teams(id) ON DELETE CASCADE
+        )""",
+        f"""CREATE TABLE IF NOT EXISTS bookmaker_event_map (
+            arb_event_id INT NOT NULL,
+            bookmaker_id INT NOT NULL,
+            bookmaker_event_id VARCHAR(255) NOT NULL,
+            PRIMARY KEY(arb_event_id, bookmaker_id),
+            FOREIGN KEY(arb_event_id) REFERENCES arb_events(id) ON DELETE CASCADE,
+            FOREIGN KEY(bookmaker_id) REFERENCES bookmakers(id) ON DELETE CASCADE
         )""",
         f"""CREATE TABLE IF NOT EXISTS markets (
             id {pk},
-            name VARCHAR(255),
-            param VARCHAR(64),
-            UNIQUE(name, param)
-        )""",
-        f"""CREATE TABLE IF NOT EXISTS matches (
-            id {pk},
-            match_uid VARCHAR(64) UNIQUE,
-            home_team_id INT,
-            away_team_id INT,
-            start_time DATETIME,
-            market_id INT,
-            FOREIGN KEY(home_team_id) REFERENCES teams(id) ON DELETE CASCADE,
-            FOREIGN KEY(away_team_id) REFERENCES teams(id) ON DELETE CASCADE,
-            FOREIGN KEY(market_id) REFERENCES markets(id) ON DELETE CASCADE
+            arb_event_id INT NOT NULL,
+            name VARCHAR(255) NOT NULL,
+            line VARCHAR(64),
+            UNIQUE(arb_event_id, name, line),
+            FOREIGN KEY(arb_event_id) REFERENCES arb_events(id) ON DELETE CASCADE
         )""",
         f"""CREATE TABLE IF NOT EXISTS odds (
             id {pk},
-            match_id INT,
-            bookmaker_id INT,
-            option_key VARCHAR(32),
-            decimal_odds DOUBLE,
-            offer_url VARCHAR(1024),
-            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(match_id, bookmaker_id, option_key),
-            FOREIGN KEY(match_id) REFERENCES matches(id) ON DELETE CASCADE,
+            market_id INT NOT NULL,
+            bookmaker_id INT NOT NULL,
+            outcome VARCHAR(255) NOT NULL,
+            value DOUBLE NOT NULL,
+            last_updated {ts} NOT NULL DEFAULT (CURRENT_TIMESTAMP),
+            UNIQUE(market_id, bookmaker_id, outcome),
+            FOREIGN KEY(market_id) REFERENCES markets(id) ON DELETE CASCADE,
             FOREIGN KEY(bookmaker_id) REFERENCES bookmakers(id) ON DELETE CASCADE
         )""",
         f"""CREATE TABLE IF NOT EXISTS odds_history (
             id {pk},
-            match_id INT,
-            bookmaker_id INT,
-            market_id INT,
-            option_key VARCHAR(32),
-            decimal_odds DOUBLE,
-            offer_url VARCHAR(1024),
-            recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY(match_id) REFERENCES matches(id) ON DELETE CASCADE,
+            market_id INT NOT NULL,
+            bookmaker_id INT NOT NULL,
+            outcome VARCHAR(255) NOT NULL,
+            value DOUBLE NOT NULL,
+            recorded_at {ts} NOT NULL DEFAULT (CURRENT_TIMESTAMP),
+            FOREIGN KEY(market_id) REFERENCES markets(id) ON DELETE CASCADE,
             FOREIGN KEY(bookmaker_id) REFERENCES bookmakers(id) ON DELETE CASCADE
         )""",
+        # NOTE: new columns: line, legs_hash; new uniqueness (event_fingerprint, market_key, line, legs_hash)
         f"""CREATE TABLE IF NOT EXISTS opportunities (
             id {pk},
-            match_label VARCHAR(255),
-            market VARCHAR(64),
-            sport VARCHAR(64),
-            start_time DATETIME,
-            best_odds {json_type},
-            best_books {json_type},
-            best_urls {json_type},
-            stakes {json_type},
-            profit DOUBLE,
-            roi DOUBLE,
-            alert_sent BOOLEAN DEFAULT 0,
-            detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(match_label, market, start_time)
+            arb_event_id INT NOT NULL,
+            sport_id INT NOT NULL,
+            event_fingerprint VARCHAR(255) NOT NULL,
+            market_key VARCHAR(128) NOT NULL,
+            line VARCHAR(64),
+            profit_pct DOUBLE NOT NULL,
+            legs_json TEXT NOT NULL,
+            legs_hash VARCHAR(64),
+            created_at {ts} NOT NULL DEFAULT (CURRENT_TIMESTAMP),
+            FOREIGN KEY(arb_event_id) REFERENCES arb_events(id) ON DELETE CASCADE
         )""",
     ]
 
     with get_cursor() as cur:
+        # core tables
         for stmt in ddl:
+            cur.execute(stmt)
+
+        # ---- Gentle migrations for opportunities ----
+        def _col_exists(table: str, column: str) -> bool:
+            if _is_sqlite():
+                cur.execute(f"PRAGMA table_info({table})")
+                cols = {row["name"] if isinstance(row, sqlite3.Row) else row[1] for row in cur.fetchall()}
+                return column in cols
+            else:
+                cur.execute(
+                    """
+                    SELECT COUNT(1)
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s AND COLUMN_NAME=%s
+                    """,
+                    (url.database, table, column),
+                )
+                return bool(list(cur.fetchone().values())[0])
+
+        # add line
+        if not _col_exists("opportunities", "line"):
             try:
-                cur.execute(stmt)
-            except Exception as e:
-                print(f"⚠️ Skipped statement due to: {e}")
+                cur.execute("ALTER TABLE opportunities ADD COLUMN line VARCHAR(64)")
+            except Exception:
+                pass
+        # add legs_hash
+        if not _col_exists("opportunities", "legs_hash"):
+            try:
+                cur.execute("ALTER TABLE opportunities ADD COLUMN legs_hash VARCHAR(64)")
+            except Exception:
+                pass
 
-        # --- Index Management ---
-        if is_sqlite:
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_matches_start_time ON matches(start_time)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_odds_match_bookmaker ON odds(match_id, bookmaker_id)")
-        else:
-            cur.execute("SHOW INDEX FROM matches WHERE Key_name='idx_matches_start_time'")
-            if cur.fetchone():
-                cur.execute("DROP INDEX idx_matches_start_time ON matches")
-
-            cur.execute("SHOW INDEX FROM odds WHERE Key_name='idx_odds_match_bookmaker'")
-            if cur.fetchone():
-                cur.execute("DROP INDEX idx_odds_match_bookmaker ON odds")
-
-            cur.execute("CREATE INDEX idx_matches_start_time ON matches(start_time)")
-            cur.execute("CREATE INDEX idx_odds_match_bookmaker ON odds(match_id, bookmaker_id)")
-
-            # --- Legacy Cleanup ---
-            cur.execute("""
-                SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
-                WHERE TABLE_SCHEMA = DATABASE()
-                AND TABLE_NAME = 'odds_history'
-                AND COLUMN_NAME = 'odds'
-            """)
-            if cur.fetchone():
-                print("🧹 Removing legacy column 'odds' from odds_history...")
-                cur.execute("ALTER TABLE odds_history DROP COLUMN odds")
-
-
-# ================================================================
-# HELPERS
-# ================================================================
-def _json(obj):
-    """Safe JSON serialization with unicode support."""
-    return json.dumps(obj, ensure_ascii=False)
-
-
-def _utcnow():
-    """Consistent UTC timestamps."""
-    return datetime.utcnow()
-
-
-# ================================================================
-# PERSIST OPPORTUNITIES
-# ================================================================
-def save_opportunity(match_label, market, sport, start_time,
-                     best_odds, best_books, best_urls, stakes, profit, roi):
-    ph = "?" if _is_sqlite() else "%s"
-
-    sql = (
-        f"""INSERT INTO opportunities 
-        (match_label, market, sport, start_time,
-         best_odds, best_books, best_urls, stakes, profit, roi)
-        VALUES ({','.join([ph]*10)})
-        ON CONFLICT(match_label, market, start_time) DO UPDATE SET
-            best_odds=excluded.best_odds,
-            best_books=excluded.best_books,
-            best_urls=excluded.best_urls,
-            stakes=excluded.stakes,
-            profit=excluded.profit,
-            roi=excluded.roi,
-            detected_at=CURRENT_TIMESTAMP,
-            alert_sent=0"""
-        if _is_sqlite() else
-        f"""INSERT INTO opportunities 
-        (match_label, market, sport, start_time,
-         best_odds, best_books, best_urls, stakes, profit, roi)
-        VALUES ({','.join([ph]*10)})
-        ON DUPLICATE KEY UPDATE
-            best_odds=VALUES(best_odds),
-            best_books=VALUES(best_books),
-            best_urls=VALUES(best_urls),
-            stakes=VALUES(stakes),
-            profit=VALUES(profit),
-            roi=VALUES(roi),
-            detected_at=CURRENT_TIMESTAMP,
-            alert_sent=0"""
-    )
-
-    with get_cursor() as cur:
-        cur.execute(sql, (
-            match_label.strip() if match_label else None,
-            market.strip() if market else None,
-            sport.strip() if sport else None,
-            start_time or _utcnow(),
-            _json(best_odds),
-            _json(best_books),
-            _json(best_urls),
-            _json(stakes),
-            float(profit) if profit is not None else None,
-            float(roi) if roi is not None else None,
-        ))
-
-
-# ================================================================
-# FETCH RECENT OPPORTUNITIES
-# ================================================================
-def get_recent_opportunities(limit=20):
-    ph = "?" if _is_sqlite() else "%s"
-    sql = f"SELECT * FROM opportunities ORDER BY detected_at DESC LIMIT {ph}"
-
-    with get_cursor(commit=False) as cur:
-        cur.execute(sql, (limit,))
-        return cur.fetchall()
-
-
-# ================================================================
-# CLEANUP OLD DATA
-# ================================================================
-def cleanup_db(days=30):
-    cutoff = _utcnow() - timedelta(days=days)
-    ph = "?" if _is_sqlite() else "%s"
-
-    with get_cursor() as cur:
-        cur.execute(f"DELETE FROM opportunities WHERE start_time < {ph}", (cutoff,))
-        cur.execute(f"DELETE FROM odds WHERE last_updated < {ph}", (cutoff,))
-        cur.execute(f"DELETE FROM odds_history WHERE recorded_at < {ph}", (cutoff,))
-        cur.execute(f"DELETE FROM matches WHERE start_time < {ph}", (cutoff,))
-
-
-# ================================================================
-# UPSERT MATCH + ODDS
-# ================================================================
-def upsert_match(home_team, away_team, bookmaker, market_name, market_param,
-                 odds_dict, start_time=None, start_time_iso=None,
-                 offer_url=None, match_uid=None):
-
-    ph = "?" if _is_sqlite() else "%s"
-
-    def first_col(row):
-        if row is None:
-            return None
-        return row[0] if isinstance(row, tuple) else list(row.values())[0]
-
-    with get_cursor() as cur:
-        # --- Teams ---
-        for team in (home_team, away_team):
-            if _is_sqlite():
-                cur.execute(f"INSERT OR IGNORE INTO teams (name) VALUES ({ph})", (team.strip(),))
-            else:
-                cur.execute(f"INSERT IGNORE INTO teams (name) VALUES ({ph})", (team.strip(),))
-
-        cur.execute(f"SELECT id FROM teams WHERE name={ph}", (home_team.strip(),))
-        home_team_id = first_col(cur.fetchone())
-        cur.execute(f"SELECT id FROM teams WHERE name={ph}", (away_team.strip(),))
-        away_team_id = first_col(cur.fetchone())
-
-        # --- Market ---
+        # indices
         if _is_sqlite():
-            cur.execute(f"INSERT OR IGNORE INTO markets (name, param) VALUES ({ph}, {ph})",
-                        (market_name.strip(), market_param))
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_arb_events_sport_time ON arb_events(sport_id, start_time)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_markets_event ON markets(arb_event_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_odds_market ON odds(market_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_odds_bm ON odds(bookmaker_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_hist_market_time ON odds_history(market_id, recorded_at)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_opps_created ON opportunities(created_at)")
+            cur.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uniq_opps_event_market_line_legs "
+                "ON opportunities(event_fingerprint, market_key, line, legs_hash)"
+            )
         else:
-            cur.execute(f"INSERT IGNORE INTO markets (name, param) VALUES ({ph}, {ph})",
-                        (market_name.strip(), market_param))
-        cur.execute(f"SELECT id FROM markets WHERE name={ph} AND param={ph}",
-                    (market_name.strip(), market_param))
-        market_id = first_col(cur.fetchone())
+            def ensure_index(index_name: str, table_name: str, create_sql: str):
+                cur.execute(
+                    """
+                    SELECT COUNT(1)
+                    FROM information_schema.statistics
+                    WHERE table_schema=%s AND table_name=%s AND index_name=%s
+                    """,
+                    (url.database, table_name, index_name),
+                )
+                exists = cur.fetchone()
+                exists = list(exists.values())[0] if isinstance(exists, dict) else exists[0]
+                if not exists:
+                    cur.execute(create_sql)
 
-        # --- Bookmaker ---
-        any_offer_url = next(
-            (d.get("offer_url") for d in odds_dict.values()
-             if isinstance(d, dict) and d.get("offer_url")),
-            offer_url
+            ensure_index("idx_arb_events_sport_time", "arb_events",
+                         "CREATE INDEX idx_arb_events_sport_time ON arb_events(sport_id, start_time)")
+            ensure_index("idx_markets_event", "markets",
+                         "CREATE INDEX idx_markets_event ON markets(arb_event_id)")
+            ensure_index("idx_odds_market", "odds",
+                         "CREATE INDEX idx_odds_market ON odds(market_id)")
+            ensure_index("idx_odds_bm", "odds",
+                         "CREATE INDEX idx_odds_bm ON odds(bookmaker_id)")
+            ensure_index("idx_hist_market_time", "odds_history",
+                         "CREATE INDEX idx_hist_market_time ON odds_history(market_id, recorded_at)")
+            ensure_index("idx_opps_created", "opportunities",
+                         "CREATE INDEX idx_opps_created ON opportunities(created_at)")
+
+            # Best-effort: drop old unique on (event_fingerprint, market_key, created_at) if present
+            try:
+                cur.execute(
+                    """
+                    SELECT DISTINCT index_name
+                    FROM information_schema.statistics
+                    WHERE table_schema=%s AND table_name='opportunities'
+                    GROUP BY index_name
+                    """,
+                    (url.database,),
+                )
+                idx_names = [list(r.values())[0] for r in cur.fetchall()]
+                for name in idx_names:
+                    if not name:
+                        continue
+                    cur.execute(
+                        """
+                        SELECT COLUMN_NAME, NON_UNIQUE
+                        FROM information_schema.statistics
+                        WHERE table_schema=%s AND table_name='opportunities' AND index_name=%s
+                        ORDER BY SEQ_IN_INDEX
+                        """,
+                        (url.database, name),
+                    )
+                    cols = [r["COLUMN_NAME"] for r in cur.fetchall()]
+                    if cols == ["event_fingerprint", "market_key", "created_at"]:
+                        cur.execute(f"ALTER TABLE opportunities DROP INDEX {name}")
+                        break
+            except Exception:
+                pass
+
+            ensure_index(
+                "uniq_opps_event_market_line_legs", "opportunities",
+                "CREATE UNIQUE INDEX uniq_opps_event_market_line_legs "
+                "ON opportunities(event_fingerprint, market_key, line, legs_hash)"
+            )
+
+    print("✅ DB schema ready")
+
+
+# =========================================================
+# HISTORY SCHEMA DETECTOR
+# =========================================================
+_HISTORY_MODE = None  # "old" or "new"
+
+
+def _detect_history_mode() -> str:
+    """Check if odds_history table is in old or new shape."""
+    global _HISTORY_MODE
+    if _HISTORY_MODE:
+        return _HISTORY_MODE
+    try:
+        with get_cursor(commit=False) as cur:
+            if _is_sqlite():
+                cur.execute("PRAGMA table_info(odds_history)")
+                cols = {row["name"] if isinstance(row, sqlite3.Row) else row[1] for row in cur.fetchall()}
+            else:
+                cur.execute(
+                    """
+                    SELECT COLUMN_NAME
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA=%s AND TABLE_NAME='odds_history'
+                    """,
+                    (url.database,),
+                )
+                cols = {r["COLUMN_NAME"] for r in cur.fetchall()}
+        if {"market_id", "bookmaker_id", "outcome", "value", "recorded_at"}.issubset(cols):
+            _HISTORY_MODE = "new"
+        elif {"odds_id", "value", "recorded_at"}.issubset(cols):
+            _HISTORY_MODE = "old"
+        else:
+            _HISTORY_MODE = "new"
+    except Exception:
+        _HISTORY_MODE = "new"
+    return _HISTORY_MODE
+
+
+# =========================================================
+# BASIC RESOLVERS
+# =========================================================
+def upsert_sport(name: str) -> int:
+    ph = _ph()
+    with get_cursor() as cur:
+        if _is_sqlite():
+            cur.execute(f"INSERT OR IGNORE INTO sports(name) VALUES({ph})", (name,))
+        else:
+            cur.execute(f"INSERT IGNORE INTO sports(name) VALUES({ph})", (name,))
+        cur.execute(f"SELECT id FROM sports WHERE name={ph}", (name,))
+        return _first_id(cur.fetchone())
+
+
+def upsert_team(name: str) -> int:
+    """Insert team if not exists, return id. Check aliases too."""
+    ph = _ph()
+    with get_cursor() as cur:
+        cur.execute(f"SELECT team_id FROM team_aliases WHERE alias={ph}", (name,))
+        row = cur.fetchone()
+        if row:
+            return row["team_id"] if not isinstance(row, tuple) else row[0]
+
+        if _is_sqlite():
+            cur.execute(f"INSERT OR IGNORE INTO teams(name) VALUES({ph})", (name,))
+        else:
+            cur.execute(f"INSERT IGNORE INTO teams(name) VALUES({ph})", (name,))
+        cur.execute(f"SELECT id FROM teams WHERE name={ph}", (name,))
+        team_id = _first_id(cur.fetchone())
+        if team_id:
+            if _is_sqlite():
+                cur.execute(f"INSERT OR IGNORE INTO team_aliases(team_id,alias) VALUES({ph},{ph})", (team_id, name))
+            else:
+                cur.execute(f"INSERT IGNORE INTO team_aliases(team_id,alias) VALUES({ph},{ph})", (team_id, name))
+        return team_id
+
+
+def resolve_bookmaker_id(name: str, url_str: Optional[str] = None) -> int:
+    ph = _ph()
+    with get_cursor() as cur:
+        if _is_sqlite():
+            cur.execute(f"INSERT OR IGNORE INTO bookmakers(name,url) VALUES({ph},{ph})", (name, url_str))
+        else:
+            cur.execute(f"INSERT IGNORE INTO bookmakers(name,url) VALUES({ph},{ph})", (name, url_str))
+        cur.execute(f"SELECT id FROM bookmakers WHERE name={ph}", (name,))
+        return _first_id(cur.fetchone())
+
+
+def resolve_sport_id(name: str) -> int:
+    return upsert_sport(name)
+
+
+# =========================================================
+# EVENT HANDLER (bookmaker mapping is optional)
+# =========================================================
+def upsert_event(event_data: Dict[str, Any]) -> int:
+    """
+    event_data = {
+      'sport_name': str, 'competition_name': str, 'category': str, 'start_time': datetime,
+      'home_team': str, 'away_team': str,
+      # optional mapping (recommended):
+      'bookmaker_id': int, 'bookmaker_event_id': str
+    }
+    """
+    sport_id = upsert_sport(event_data["sport_name"])
+    home_id = upsert_team(event_data["home_team"])
+    away_id = upsert_team(event_data["away_team"])
+
+    ph = _ph()
+    with get_cursor() as cur:
+        cur.execute(
+            f"SELECT id FROM arb_events WHERE sport_id={ph} AND home_team_id={ph} AND away_team_id={ph} AND start_time={ph}",
+            (sport_id, home_id, away_id, event_data["start_time"]),
         )
+        row = cur.fetchone()
+        if row:
+            arb_event_id = _first_id(row)
+        else:
+            cur.execute(
+                f"INSERT INTO arb_events(sport_id,competition_name,category,start_time,home_team_id,away_team_id) "
+                f"VALUES({ph},{ph},{ph},{ph},{ph},{ph})",
+                (sport_id, event_data.get("competition_name"), event_data.get("category"),
+                 event_data["start_time"], home_id, away_id),
+            )
+            arb_event_id = cur.lastrowid
+
+        bm_id = event_data.get("bookmaker_id")
+        bm_eid = event_data.get("bookmaker_event_id")
+        if bm_id is not None and bm_eid is not None:
+            cur.execute(
+                f"REPLACE INTO bookmaker_event_map(arb_event_id,bookmaker_id,bookmaker_event_id) VALUES({ph},{ph},{ph})",
+                (arb_event_id, bm_id, str(bm_eid)),
+            )
+    return int(arb_event_id)
+
+
+def upsert_market(arb_event_id: int, name: str, line: Optional[str] = None) -> int:
+    ph = _ph()
+    with get_cursor() as cur:
         if _is_sqlite():
-            cur.execute(f"INSERT OR IGNORE INTO bookmakers (name, url) VALUES ({ph}, {ph})",
-                        (bookmaker.strip(), any_offer_url))
+            cur.execute(
+                f"INSERT INTO markets(arb_event_id,name,line) VALUES({ph},{ph},{ph}) "
+                f"ON CONFLICT(arb_event_id,name,line) DO NOTHING",
+                (arb_event_id, name, line),
+            )
         else:
-            cur.execute(f"INSERT IGNORE INTO bookmakers (name, url) VALUES ({ph}, {ph})",
-                        (bookmaker.strip(), any_offer_url))
-        cur.execute(f"SELECT id FROM bookmakers WHERE name={ph}", (bookmaker.strip(),))
-        bookmaker_id = first_col(cur.fetchone())
+            cur.execute(
+                f"INSERT INTO markets(arb_event_id,name,line) VALUES({ph},{ph},{ph}) "
+                f"ON DUPLICATE KEY UPDATE id = id",
+                (arb_event_id, name, line),
+            )
+        cur.execute(
+            f"SELECT id FROM markets WHERE arb_event_id={ph} AND name={ph} "
+            f"AND ((line IS NULL AND {ph} IS NULL) OR line={ph})",
+            (arb_event_id, name, line, line),
+        )
+        return _first_id(cur.fetchone())
 
-        # --- Match ---
-        if match_uid:
-            if _is_sqlite():
-                cur.execute(f"""
-                    INSERT OR IGNORE INTO matches
-                    (match_uid, home_team_id, away_team_id, start_time, market_id)
-                    VALUES ({ph}, {ph}, {ph}, {ph}, {ph})
-                """, (match_uid, home_team_id, away_team_id, start_time, market_id))
-            else:
-                cur.execute(f"""
-                    INSERT IGNORE INTO matches
-                    (match_uid, home_team_id, away_team_id, start_time, market_id)
-                    VALUES ({ph}, {ph}, {ph}, {ph}, {ph})
-                """, (match_uid, home_team_id, away_team_id, start_time, market_id))
-            cur.execute(f"SELECT id FROM matches WHERE match_uid={ph}", (match_uid,))
-        else:
-            if _is_sqlite():
-                cur.execute(f"""
-                    INSERT OR IGNORE INTO matches
-                    (home_team_id, away_team_id, start_time, market_id)
-                    VALUES ({ph}, {ph}, {ph}, {ph})
-                """, (home_team_id, away_team_id, start_time, market_id))
-            else:
-                cur.execute(f"""
-                    INSERT IGNORE INTO matches
-                    (home_team_id, away_team_id, start_time, market_id)
-                    VALUES ({ph}, {ph}, {ph}, {ph})
-                """, (home_team_id, away_team_id, start_time, market_id))
-            cur.execute(f"""
-                SELECT id FROM matches
-                WHERE home_team_id={ph} AND away_team_id={ph} AND start_time={ph} AND market_id={ph}
-            """, (home_team_id, away_team_id, start_time, market_id))
-        match_id = first_col(cur.fetchone())
 
-        # --- Odds ---
-        for option_key, odd_data in odds_dict.items():
-            if isinstance(odd_data, dict):
-                decimal_odds = odd_data.get("decimal_odds")
-                offer_link = odd_data.get("offer_url", offer_url)
-            else:
-                decimal_odds = odd_data
-                offer_link = offer_url
+# =========================================================
+# ODDS SNAPSHOT + HISTORY
+# =========================================================
+def upsert_odds_snapshot(market_id: int, bookmaker_id: int, outcome: str, value: float) -> int:
+    ph = _ph()
+    now = _utcnow()
+    mode = _detect_history_mode()
 
-            # Odds History
-            if _is_sqlite():
-                cur.execute(f"""
-                    INSERT INTO odds_history
-                    (match_id, bookmaker_id, market_id, option_key, decimal_odds, offer_url)
-                    VALUES ({",".join([ph]*6)})
-                """, (match_id, bookmaker_id, market_id, option_key, decimal_odds, offer_link))
+    with get_cursor() as cur:
+        cur.execute(
+            f"SELECT id, value FROM odds WHERE market_id={ph} AND bookmaker_id={ph} AND outcome={ph}",
+            (market_id, bookmaker_id, outcome),
+        )
+        row = cur.fetchone()
+        if row:
+            odds_id = row["id"] if not isinstance(row, tuple) else row[0]
+            last_val = row["value"] if not isinstance(row, tuple) else row[1]
+            if float(last_val) != float(value):
+                cur.execute(f"UPDATE odds SET value={ph}, last_updated={ph} WHERE id={ph}", (value, now, odds_id))
+                try:
+                    if mode == "new":
+                        cur.execute(
+                            f"INSERT INTO odds_history(market_id,bookmaker_id,outcome,value,recorded_at) VALUES({ph},{ph},{ph},{ph},{ph})",
+                            (market_id, bookmaker_id, outcome, value, now),
+                        )
+                    else:
+                        cur.execute(
+                            f"INSERT INTO odds_history(odds_id,value,recorded_at) VALUES({ph},{ph},{ph})",
+                            (odds_id, value, now),
+                        )
+                except Exception as e:
+                    print(f"[WARN] history_insert_failed: {e}")
             else:
-                cur.execute(f"""
-                    INSERT INTO odds_history
-                    (match_id, bookmaker_id, market_id, option_key, decimal_odds, offer_url)
-                    VALUES ({",".join([ph]*6)})
-                    ON DUPLICATE KEY UPDATE decimal_odds=VALUES(decimal_odds), offer_url=VALUES(offer_url)
-                """, (match_id, bookmaker_id, market_id, option_key, decimal_odds, offer_link))
+                cur.execute(f"UPDATE odds SET last_updated={ph} WHERE id={ph}", (now, odds_id))
+            return odds_id
 
-            # Current Odds
-            if _is_sqlite():
-                cur.execute(f"""
-                    INSERT INTO odds
-                    (match_id, bookmaker_id, option_key, decimal_odds, offer_url)
-                    VALUES ({",".join([ph]*5)})
-                    ON CONFLICT(match_id, bookmaker_id, option_key)
-                    DO UPDATE SET decimal_odds=excluded.decimal_odds,
-                                  offer_url=excluded.offer_url
-                """, (match_id, bookmaker_id, option_key, decimal_odds, offer_link))
+        cur.execute(
+            f"INSERT INTO odds(market_id,bookmaker_id,outcome,value,last_updated) VALUES({ph},{ph},{ph},{ph},{ph})",
+            (market_id, bookmaker_id, outcome, value, now),
+        )
+        odds_id = cur.lastrowid
+        try:
+            if mode == "new":
+                cur.execute(
+                    f"INSERT INTO odds_history(market_id,bookmaker_id,outcome,value,recorded_at) VALUES({ph},{ph},{ph},{ph},{ph})",
+                    (market_id, bookmaker_id, outcome, value, now),
+                )
             else:
-                cur.execute(f"""
-                    INSERT INTO odds
-                    (match_id, bookmaker_id, option_key, decimal_odds, offer_url)
-                    VALUES ({",".join([ph]*5)})
-                    ON DUPLICATE KEY UPDATE decimal_odds=VALUES(decimal_odds), offer_url=VALUES(offer_url)
-                """, (match_id, bookmaker_id, option_key, decimal_odds, offer_link))
+                cur.execute(
+                    f"INSERT INTO odds_history(odds_id,value,recorded_at) VALUES({ph},{ph},{ph})",
+                    (odds_id, value, now),
+                )
+        except Exception as e:
+            print(f"[WARN] history_insert_failed: {e}")
+        return odds_id
 
-        return match_id
+
+def upsert_odds(market_id: int, bookmaker_id: int, outcome: str, value: float) -> int:
+    return upsert_odds_snapshot(market_id, bookmaker_id, outcome, value)
+
+
+# =========================================================
+# QUERIES FOR CALCULATOR
+# =========================================================
+def get_latest_odds_for_window(
+    sport_id: int,
+    start_from: datetime,
+    start_to: datetime,
+    market_names: Iterable[str],
+    include_lines: bool = True,
+) -> List[Dict[str, Any]]:
+    """
+    Returns odds rows for the calculator. Includes home/away team names so
+    the calculator can canonicalize 1/X/2 even when outcomes are saved as
+    team names by a bookmaker.
+    """
+    ph = _ph()
+    names = list(market_names)
+    if not names:
+        return []
+    with get_cursor(commit=False) as cur:
+        q = (
+            f"SELECT ae.id AS arb_event_id, ae.start_time, "
+            f"       th.name AS home_team, ta.name AS away_team, "
+            f"       m.id AS market_id, m.name AS market_name, m.line, "
+            f"       o.bookmaker_id, o.outcome, o.value "
+            f"FROM arb_events ae "
+            f"JOIN teams th ON th.id = ae.home_team_id "
+            f"JOIN teams ta ON ta.id = ae.away_team_id "
+            f"JOIN markets m ON m.arb_event_id = ae.id "
+            f"JOIN odds o ON o.market_id = m.id "
+            f"WHERE ae.sport_id = {ph} AND ae.start_time >= {ph} AND ae.start_time < {ph} "
+            f"  AND m.name IN ({','.join([ph]*len(names))}) "
+            f"ORDER BY ae.start_time ASC"
+        )
+        cur.execute(q, (sport_id, start_from, start_to, *names))
+        rows = cur.fetchall()
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            out.append(dict(r) if isinstance(r, sqlite3.Row) else r)
+        return out
+
+
+# =========================================================
+# MISC HELPERS
+# =========================================================
+def _json(data: Any) -> str:
+    return json.dumps(data, ensure_ascii=False)
+
+
+def bulk_execute(sql: str, params: List[Tuple[Any, ...]], commit: bool = True) -> None:
+    with get_cursor(commit=commit) as cur:
+        cur.executemany(sql, params)
 
 
 if __name__ == "__main__":
-    print("Initializing database schema...")
     init_db()
-    print("✅ Database schema ready (with opportunities + indexes + housekeeping).")

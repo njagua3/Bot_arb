@@ -32,7 +32,7 @@ def stake(update: Update, context: CallbackContext):
 def start(update: Update, context: CallbackContext):
     current_stake = load_stake()
     update.message.reply_text(
-        f"🤖 Hello! Welcome to Njagua Arb Bot.\n" 
+        f"🤖 Hello! Welcome to ArbXtreme Bot.\n" 
         f"Your current stake is {current_stake} KES.\n"
         f"Use /stake <amount> to change it."
     )

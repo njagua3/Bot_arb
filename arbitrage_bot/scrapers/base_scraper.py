@@ -10,6 +10,7 @@ from bs4 import BeautifulSoup
 
 from utils.match_utils import build_match_dict
 from .proxy_pool import ProxyPool
+from core.db import resolve_market_id, resolve_bookmaker_id
 
 logger = logging.getLogger("scraper")
 logger.setLevel(logging.INFO)

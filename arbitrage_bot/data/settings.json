@@ -1,3 +1,17 @@
 {
-  "stake": 10000
+  "stake": 20000.0,
+  "min_profit_percent": 3.0,
+  "min_profit_absolute": 300.0,
+  "cache_expiry_minutes": 5,
+  "scan_interval": 180,
+  "log_dir": "data",
+  "log_file": "arb_log.txt",
+  "log_console": true,
+  "target_markets": [
+    "1X2",
+    "Match Winner",
+    "Over/Under",
+    "Both Teams To Score",
+    "Double Chance"
+  ]
 }

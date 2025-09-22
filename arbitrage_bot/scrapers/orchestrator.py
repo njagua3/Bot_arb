@@ -4,16 +4,15 @@ import json
 import logging
 import os
 from datetime import datetime
-from typing import List, Union, Dict, Any, Optional
+from typing import List, Dict, Any, Optional  # 👈 removed Union
 
 import redis
 from celery.result import AsyncResult
 
-from .base_scraper import BaseScraper
-from .async_base_scraper import AsyncBaseScraper
-from .tasks import run_scraper_task
+# ❌ removed: from .base_scraper import BaseScraper
+from .async_base_scraper import AsyncBaseScraper  # 👈 async-only
+# ❌ removed: from .tasks import run_scraper_task  (avoids circular import)
 from .scraper_loader import discover_scrapers
-
 
 # ---------- JSON logger ----------
 class JsonFormatter(logging.Formatter):
@@ -26,11 +25,10 @@ class JsonFormatter(logging.Formatter):
         }
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)
-        # include any extra attributes on the record (avoid overwriting keys above)
         for k, v in getattr(record, "__dict__", {}).items():
             if k not in payload and k not in ("args", "msg", "exc_info", "stack_info"):
                 try:
-                    json.dumps(v)  # ensure serializable
+                    json.dumps(v)
                     payload[k] = v
                 except Exception:
                     payload[k] = str(v)
@@ -42,7 +40,8 @@ if not logger.handlers:
     handler = logging.StreamHandler()
     handler.setFormatter(JsonFormatter())
     logger.addHandler(handler)
-logger.setLevel(os.getenv("SCRAPER_LOG_LEVEL", "INFO"))
+_lvl = os.getenv("SCRAPER_LOG_LEVEL", "INFO").upper()
+logger.setLevel(logging._nameToLevel.get(_lvl, logging.INFO))
 
 
 class ScraperOrchestrator:
@@ -57,7 +56,7 @@ class ScraperOrchestrator:
 
     def __init__(
         self,
-        scrapers: List[Union[BaseScraper, AsyncBaseScraper]] = None,
+        scrapers: List[AsyncBaseScraper] = None,  # 👈 type-hint is async-only now
         cache_enabled: bool = True,
         max_concurrent: int = 5,
         task_timeout: int = 40,
@@ -115,9 +114,6 @@ class ScraperOrchestrator:
             return None
 
     def clear_cache(self, bookmaker: str, extra: str = "") -> None:
-        """
-        Manually invalidate cache for a bookmaker.
-        """
         key = self._cache_key(bookmaker, "odds", extra)
         try:
             if self.redis:
@@ -129,12 +125,11 @@ class ScraperOrchestrator:
             logger.error(json.dumps({"event": "cache_clear_failed", "bookmaker": bookmaker, "error": str(e)}))
 
     # --------------------
-    # orchestration
+    # orchestration (async + sync wrappers)
     # --------------------
-    def run(self) -> Dict[str, Any]:
+    async def run_async(self) -> Dict[str, Any]:
         """
         Submit all scrapers as Celery tasks and collect results.
-        Returns structured dict with status, matches, bookmakers_run, timestamp.
         """
         if not self.scrapers:
             logger.warning(json.dumps({"event": "no_scrapers_found"}))
@@ -173,23 +168,30 @@ class ScraperOrchestrator:
                 task_kwargs = {
                     "scraper_module": scraper.__class__.__module__,
                     "scraper_class": scraper.__class__.__name__,
-                    "proxy_pool": getattr(scraper, "proxy_pool", None),
                 }
+                proxy_pool = getattr(scraper, "proxy_pool", None)
+                if proxy_pool:
+                    try:
+                        if hasattr(proxy_pool, "to_list"):
+                            task_kwargs["proxies"] = proxy_pool.to_list()
+                        elif hasattr(proxy_pool, "proxies"):
+                            task_kwargs["proxies"] = list(proxy_pool.proxies)
+                    except Exception as e:
+                        logger.warning(json.dumps({
+                            "event": "proxy_pool_serialize_failed",
+                            "bookmaker": scraper.bookmaker,
+                            "error": str(e),
+                        }))
 
                 try:
-                    task = run_scraper_task.apply_async(
+                    # ✅ Avoid circular import by sending by task name
+                    async_result = celery.send_task(
+                        "scrapers.tasks.run_scraper_task",
                         kwargs=task_kwargs,
                         queue=queue,
-                        retry=True,
-                        retry_policy={
-                            "max_retries": self.task_retries,
-                            "interval_start": 5,
-                            "interval_step": 10,
-                            "interval_max": 30,
-                        },
                     )
                     logger.info(json.dumps({"event": "task_submitted", "bookmaker": scraper.bookmaker, "queue": queue}))
-                    tasks.append((scraper, task, cache_key))
+                    tasks.append((scraper, async_result, cache_key))
                 except Exception as e:
                     logger.error(json.dumps({"event": "task_submit_failed", "bookmaker": scraper.bookmaker, "error": str(e)}))
                     if self.redis:
@@ -199,13 +201,27 @@ class ScraperOrchestrator:
             aggregated.extend(gathered)
             return aggregated
 
-        matches = asyncio.run(orchestrate())
+        matches = await orchestrate()
         return {
             "status": "OK",
             "matches": matches,
             "bookmakers_run": list(set(bookmakers_run)),
             "timestamp": datetime.utcnow().isoformat(),
         }
+
+    def run(self) -> Dict[str, Any]:
+        """
+        Sync wrapper for CLI scripts. If already in an async context, instruct caller to use run_async().
+        """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(self.run_async())
+
+        raise RuntimeError(
+            "ScraperOrchestrator.run() called inside a running event loop. "
+            "Use: `await ScraperOrchestrator(...).run_async()` instead."
+        )
 
     async def _gather_results(self, tasks: List[tuple], bookmakers_run: List[str]) -> List[Dict[str, Any]]:
         all_matches: List[Dict[str, Any]] = []
@@ -263,3 +279,66 @@ class ScraperOrchestrator:
                 logger.info(json.dumps({"event": "redis_closed"}))
             except Exception as e:
                 logger.warning(json.dumps({"event": "redis_close_failed", "error": str(e)}))
+
+
+# Celery app definition (so `-A scrapers.orchestrator` works)
+from celery import Celery
+from kombu import Queue
+from celery.schedules import crontab  # <-- existing
+
+celery = Celery(
+    "scrapers",
+    broker=os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0"),
+    backend=os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/0"),
+    include=["scrapers.tasks"],
+)
+
+# Configure queues
+celery.conf.task_default_queue = "default"
+celery.conf.task_queues = (
+    Queue("default", routing_key="default"),
+    Queue("high_priority", routing_key="high_priority"),
+)
+celery.conf.task_default_exchange = "default"
+celery.conf.task_default_routing_key = "default"
+
+celery.conf.task_routes = {
+    "scrapers.tasks.run_scraper_task": {
+        "queue": "high_priority",
+        "routing_key": "high_priority",
+    },
+}
+
+# PERIODIC SCHEDULE (Celery Beat)
+celery.conf.beat_schedule = {
+    "betika_0_24": {
+        "task": "scrapers.tasks.run_scraper_task",
+        "schedule": crontab(minute="*/5"),
+        "options": {"queue": "high_priority"},
+        "kwargs": {
+            "scraper_module": "scrapers.betika_scraper",
+            "scraper_class": "BetikaScraper",
+            "mode": "24",
+        },
+    },
+    "betika_24_48": {
+        "task": "scrapers.tasks.run_scraper_task",
+        "schedule": crontab(minute="*/15"),
+        "options": {"queue": "high_priority"},
+        "kwargs": {
+            "scraper_module": "scrapers.betika_scraper",
+            "scraper_class": "BetikaScraper",
+            "mode": "48",
+        },
+    },
+    "betika_gt48": {
+        "task": "scrapers.tasks.run_scraper_task",
+        "schedule": crontab(minute="5"),
+        "options": {"queue": "default"},
+        "kwargs": {
+            "scraper_module": "scrapers.betika_scraper",
+            "scraper_class": "BetikaScraper",
+            "mode": "gt48",
+        },
+    },
+}

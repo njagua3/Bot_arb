@@ -5,7 +5,7 @@ certifi==2025.7.14
 cffi==1.17.1
 charset-normalizer==3.4.2
 cryptography==45.0.6
-greenlet==3.2.4
+greenlet>=3.0.3,<3.3
 idna==3.10
 pycparser==2.22
 PyMySQL==1.1.1
@@ -34,7 +34,3 @@ redis==5.0.8
 selenium==4.25.0
 chromedriver-autoinstaller==0.6.4
 lxml==5.3.0
-
-# Since you’re using both Selenium and Playwright, you might want to install browser binaries once and cache them in Docker (if you’re containerizing). Otherwise, playwright install and chromedriver-autoinstaller will fetch them dynamically at runtime.
-# do not fprget playwright install
-#Do you want me to also help you with a Dockerfile that installs everything cleanly (Python + Chrome + Playwright browsers) so deployment is smooth?

@@ -1,4 +1,3 @@
-# main.py
 import time, signal, sys, threading, traceback
 from core.settings import load_stake, SCAN_INTERVAL
 from core.logger import log_error, log_info
@@ -88,12 +87,20 @@ def start_scanner():
 
 
 def start_telegram_bot():
-    while True:
-        try:
-            run_bot()
-        except Exception as e:
-            log_error(f"⚠️ Telegram bot crashed: {e}, restarting in 5s...")
-            time.sleep(5)
+    """
+    Start Telegram bot (single instance).
+    """
+    try:
+        log_info("🤖 Starting Telegram bot...")
+        run_bot()  # blocking call (polling loop inside)
+    except Exception as e:
+        log_error(f"⚠️ Telegram bot crashed: {e}")
+
+
+        # 💓 heartbeat log
+        if time.time() - last_heartbeat >= 600:  # every 10 minutes
+            log_info("💓 Telegram bot thread alive")
+            last_heartbeat = time.time()
 
 
 if __name__ == "__main__":

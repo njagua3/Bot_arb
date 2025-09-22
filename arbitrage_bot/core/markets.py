@@ -1,116 +1,87 @@
 # core/markets.py
-
+from __future__ import annotations
 import re
-from typing import List, Optional, Dict, Union
+from dataclasses import dataclass
+from typing import List, Optional
 
+# A small, DB-agnostic spec used everywhere in the pipeline
+@dataclass(frozen=True)
+class MarketSpec:
+    market_key: str          # canonical key, e.g. "1x2", "ml", "btts", "dc", "ou:2.5", "ah:-1"
+    line: Optional[str]      # the numeric line for OU/AH, else None
+    outcomes: List[str]      # canonical outcomes for this market
 
-class Market:
+# Canonical outcome sets
+OUT_1X2  = ["1", "X", "2"]
+OUT_ML   = ["1", "2"]
+OUT_BTTS = ["Yes", "No"]
+OUT_DC   = ["1X", "12", "X2"]
+
+def _mk_ou(line: str) -> MarketSpec:
+    return MarketSpec(market_key=f"ou:{line}", line=line, outcomes=[f"Over {line}", f"Under {line}"])
+
+def _mk_ah(line: str) -> MarketSpec:
+    return MarketSpec(market_key=f"ah:{line}", line=line, outcomes=["Home", "Away"])
+
+def normalize_market(raw: str) -> MarketSpec:
     """
-    Represents a betting market with its outcomes and structure.
-    """
-    def __init__(self, name: str, outcomes: List[str], mtype: str, param: Optional[Union[int, float]] = None):
-        """
-        :param name: Standardized market name (e.g. "1X2", "Over/Under 2.5")
-        :param outcomes: List of possible outcomes (e.g. ["1","X","2"])
-        :param mtype: "2-way", "3-way", or "special"
-        :param param: Optional market parameter (e.g. 2.5 for totals/handicap)
-        """
-        self.name = name
-        self.outcomes = outcomes
-        self.mtype = mtype
-        self.param = param
-
-    def __repr__(self):
-        return f"<Market {self.name} ({self.mtype})>"
-
-
-# ================================================================
-# STATIC MARKET DEFINITIONS
-# ================================================================
-BASE_MARKETS: Dict[str, Market] = {
-    "1X2": Market("1X2", ["1", "X", "2"], "3-way"),
-    "MATCH WINNER": Market("Match Winner", ["1", "2"], "2-way"),
-    "BTTS": Market("Both Teams to Score", ["Yes", "No"], "2-way"),
-    "DOUBLE CHANCE": Market("Double Chance", ["1X", "12", "X2"], "3-way"),
-}
-
-
-# ================================================================
-# NORMALIZATION FUNCTION
-# ================================================================
-def normalize_market_name(raw: str) -> Market:
-    """
-    Normalize raw bookmaker market name into a structured Market object.
-    Handles dynamic markets like Over/Under and Handicap.
-    Returns a fallback Market if unknown.
+    PURE normalizer: maps a bookmaker's raw market label to a MarketSpec.
+    - No DB access here.
+    - Stable canonical keys used by calculator & storage.
     """
     if not raw:
-        return Market("Unknown", [], "special")
+        return MarketSpec("unknown", None, [])
 
-    market = raw.strip().lower()
+    s = raw.strip().lower()
 
-    # -----------------------------
-    # 1X2 / Full time result
-    # -----------------------------
-    if market in ["1x2", "full time result", "result", "ft result", "match odds", "ft", "fulltime"]:
-        return BASE_MARKETS["1X2"]
+    # 1X2 / Result
+    if s in {"1x2", "full time result", "result", "ft result", "match odds", "ft", "fulltime"}:
+        return MarketSpec("1x2", None, OUT_1X2)
 
-    # -----------------------------
-    # Match Winner (2-way, no draw)
-    # -----------------------------
-    if market in ["match winner", "moneyline", "to win", "ml"]:
-        return BASE_MARKETS["MATCH WINNER"]
+    # Match Winner / Moneyline
+    if s in {"match winner", "moneyline", "to win", "ml"}:
+        return MarketSpec("ml", None, OUT_ML)
 
-    # -----------------------------
-    # DNB / AH(0) → same as Match Winner
-    # -----------------------------
-    if market in ["dnb", "draw no bet", "ah(0)", "asian handicap 0", "handicap 0"]:
-        return Market("Draw No Bet", ["1", "2"], "2-way", 0)
-
-    # -----------------------------
     # BTTS
-    # -----------------------------
-    if market in ["btts", "both teams to score", "gg/ng", "gg-ng", "goal goal", "btts yes/no"]:
-        return BASE_MARKETS["BTTS"]
+    if s in {"btts", "both teams to score", "gg/ng", "gg-ng", "goal goal", "btts yes/no"}:
+        return MarketSpec("btts", None, OUT_BTTS)
 
-    # -----------------------------
     # Double Chance
-    # -----------------------------
-    if market in ["double chance", "1x", "12", "x2"]:
-        return BASE_MARKETS["DOUBLE CHANCE"]
+    if s in {"double chance", "1x", "12", "x2"}:
+        return MarketSpec("dc", None, OUT_DC)
 
-    # -----------------------------
-    # Handicap / Asian Handicap
-    # e.g. "AHC +1.5", "asian handicap -1", "handicap +2", "handicap -0.25"
-    # -----------------------------
-    hc_match = re.search(r"(ahc|handicap|asian)[^\d+-]*([+-]?\d+(?:\.\d+)?)", market)
-    if hc_match:
-        param = float(hc_match.group(2))
-        return Market(f"Handicap {param}", ["Home", "Away"], "2-way", param)
+    # Draw No Bet (treat as AH 0 line)
+    if s in {"dnb", "draw no bet", "ah(0)", "asian handicap 0", "handicap 0"}:
+        return _mk_ah("0")
 
-    # -----------------------------
-    # Over/Under
-    # e.g. "Over 2.5", "O2.5", "Under1.5", "Total Goals Over 2.25"
-    # -----------------------------
-    ou_match = re.search(r"(total\s*goals\s*)?(o|over|u|under)[^\d]*(\d+(?:\.\d+)?)", market)
-    if ou_match:
-        param = float(ou_match.group(3))
-        return Market(
-            f"Over/Under {param}",
-            [f"Over {param}", f"Under {param}"],
-            "2-way",
-            param,
-        )
+    # Asian Handicap with explicit line
+    m = re.search(r"(?:ahc|asian|handicap)[^\d+-]*([+-]?\d+(?:\.\d+)?)", s)
+    if m:
+        return _mk_ah(m.group(1))
 
-    # -----------------------------
-    # Exact Goals
-    # -----------------------------
-    eg_match = re.search(r"(exact|exactly)\s*(\d+)", market)
-    if eg_match:
-        param = int(eg_match.group(2))
-        return Market(f"Exact Goals {param}", [f"Exactly {param}"], "special", param)
+    # Totals / Over–Under with line
+    m = re.search(r"(?:total\s*goals\s*)?(?:o|over|u|under)[^\d]*(\d+(?:\.\d+)?)", s)
+    if m:
+        line = m.group(1)
+        return _mk_ou(line)
 
-    # -----------------------------
-    # Unknown → return fallback Market
-    # -----------------------------
-    return Market(raw.strip(), [], "special")
+    # Exact goals (kept as “special”; not in MVP calc)
+    m = re.search(r"(?:exact|exactly)\s*(\d+)", s)
+    if m:
+        n = m.group(1)
+        return MarketSpec(f"exact:{n}", n, [f"Exactly {n}"])
+
+    # Fallback: passthrough label as key
+    return MarketSpec(s, None, [])
+
+def market_label_from_key(market_key: str, line: Optional[str]) -> str:
+    """
+    Human label for storing in DB (markets.name) and for Telegram messages.
+    """
+    if market_key == "1x2": return "1X2"
+    if market_key == "ml":  return "Match Winner"
+    if market_key == "btts": return "Both Teams to Score"
+    if market_key == "dc":   return "Double Chance"
+    if market_key.startswith("ou:"): return f"Over/Under {line}"
+    if market_key.startswith("ah:"): return f"Handicap {line}"
+    return market_key

@@ -1,5 +1,3 @@
-# scrapers/tasks.py
-
 import asyncio
 import importlib
 import inspect
@@ -13,10 +11,14 @@ from datetime import datetime, timezone
 
 from bs4 import BeautifulSoup
 import redis
-from celery import Celery, chain
+from celery import chain
 from playwright.sync_api import sync_playwright
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from scrapers.proxy_pool import ProxyPool
+
+# ✅ Use the SAME Celery app as orchestrator (no second app, no split registration)
+from scrapers.orchestrator import celery as celery_app
 
 
 # ---------- Logging (JSON Structured) ----------
@@ -48,18 +50,6 @@ redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
 BLACKLIST_ZSET = os.environ.get("BLACKLIST_ZSET", "proxy:blacklist")
 BLACKLIST_COOLDOWN_SEC = int(os.environ.get("PROXY_BLACKLIST_COOLDOWN", 1800))
 METRICS_PREFIX = os.environ.get("METRICS_PREFIX", "scraper:metrics")
-
-
-# ---------- Celery ----------
-CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", REDIS_URL)
-celery_app = Celery("scrapers", broker=CELERY_BROKER_URL, backend=CELERY_BROKER_URL)
-
-celery_app.conf.update(
-    result_expires=int(os.environ.get("CELERY_RESULT_EXPIRES", 3600)),
-    task_time_limit=int(os.environ.get("CELERY_TASK_TIME_LIMIT", 90)),
-    task_soft_time_limit=int(os.environ.get("CELERY_TASK_SOFT_TIME_LIMIT", 75)),
-    broker_transport_options={"visibility_timeout": 3600},
-)
 
 
 # ---------- Helpers ----------
@@ -212,7 +202,6 @@ def process_fallback_html(result: dict, scraper_module: str, scraper_class: str,
         module = importlib.import_module(scraper_module)
         cls = getattr(module, scraper_class)
 
-        # ---- Smart init logic ----
         params = inspect.signature(cls).parameters
         if "proxy_list" in params:
             scraper = cls(proxy_list=[proxy] if proxy else [])
@@ -220,7 +209,6 @@ def process_fallback_html(result: dict, scraper_module: str, scraper_class: str,
             scraper = cls(proxy=proxy)
         else:
             scraper = cls()
-        # --------------------------
 
         soup = BeautifulSoup(html, "html.parser")
 
@@ -255,16 +243,37 @@ def process_fallback_html(result: dict, scraper_module: str, scraper_class: str,
 
 # ---------- Main Scraper ----------
 @celery_app.task(bind=True, max_retries=3, default_retry_delay=5, queue="default")
-def run_scraper_task(self, scraper_module: str, scraper_class: str, proxy_pool: Optional[list] = None,
-                     max_retries: int = 3, jitter: int = 5, fallback_timeout: int = 60):
+def run_scraper_task(
+    self,
+    scraper_module: str,
+    scraper_class: str,
+    proxies: Optional[list] = None,
+    max_retries: int = 3,
+    jitter: int = 5,
+    fallback_timeout: int = 60,
+    mode: Optional[str] = None,   # allow forcing mode (e.g., BETIKA_MODE)
+):
+    """
+    Celery entrypoint. Supports both:
+    - Scrapers that expose .run() (async/sync) and write to DB themselves (e.g., Betika).
+    - Scrapers that expose get_multiple_odds()/get_odds() and return a list of matches.
+    """
     attempt = self.request.retries + 1
     proxy = None
     start_time = time.time()
 
+    # Track & restore env after run
+    prior_mode_env = os.environ.get("BETIKA_MODE")
+    if mode:
+        os.environ["BETIKA_MODE"] = mode  # "24" | "48" | "gt48" | "all"
+
     try:
+        # ---- Rebuild ProxyPool if proxies were passed ----
+        proxy_pool = ProxyPool(proxies) if proxies else None
+
         # Select proxy
         if proxy_pool:
-            avail = available_proxies(proxy_pool)
+            avail = available_proxies(proxy_pool.to_list())
             if not avail:
                 raise RuntimeError("No available proxies")
             proxy = avail[self.request.retries % len(avail)]
@@ -276,7 +285,7 @@ def run_scraper_task(self, scraper_module: str, scraper_class: str, proxy_pool: 
 
         # ---- Smart init logic (prefer proxy_list > proxy > none) ----
         params = inspect.signature(cls).parameters
-        if "proxy_list" in params:
+        if "proxy_list" in params and proxy_pool:
             scraper = cls(proxy_list=[proxy] if proxy else [])
         elif "proxy" in params:
             scraper = cls(proxy=proxy)
@@ -292,24 +301,38 @@ def run_scraper_task(self, scraper_module: str, scraper_class: str, proxy_pool: 
             "attempt": attempt,
             "max_retries": max_retries,
             "proxy": proxy,
+            "mode": mode,
         }))
 
-        # Execute scraper (supports get_multiple_odds + async)
-        if hasattr(scraper, "get_multiple_odds"):
-            result = safe_async_run(scraper.get_multiple_odds()) if getattr(scraper, "is_async", False) \
-                else scraper.get_multiple_odds()
-        else:
-            result = safe_async_run(scraper.get_odds()) if getattr(scraper, "is_async", False) \
-                else scraper.get_odds()
+        # --- Execute scraper ---
+        result_matches: List[Dict[str, Any]] = []
 
-        if not isinstance(result, list):
-            raise ValueError("Invalid scraper result (expected list)")
+        if hasattr(scraper, "run"):
+            # Scrapers that manage DB writes themselves
+            if inspect.iscoroutinefunction(scraper.run):
+                safe_async_run(scraper.run())
+            else:
+                scraper.run()
+            # Keep return contract stable for orchestrator
+            result_matches = []
+        else:
+            # Scrapers that return a list
+            if hasattr(scraper, "get_multiple_odds"):
+                data = safe_async_run(scraper.get_multiple_odds()) if getattr(scraper, "is_async", False) \
+                    else scraper.get_multiple_odds()
+            else:
+                data = safe_async_run(scraper.get_odds()) if getattr(scraper, "is_async", False) \
+                    else scraper.get_odds()
+
+            if not isinstance(data, list):
+                raise ValueError("Invalid scraper result (expected list)")
+            result_matches = data
 
         latency = time.time() - start_time
         _record_metric("success", bookmaker)
         _record_metric("latency_ms", bookmaker, int(latency * 1000))
 
-        if not result:
+        if not result_matches:
             logger.warning(json.dumps({"event": "zero_matches", "bookmaker": bookmaker}))
 
         # --- Push detailed scraper metrics if available ---
@@ -325,7 +348,7 @@ def run_scraper_task(self, scraper_module: str, scraper_class: str, proxy_pool: 
         return {
             "status": "OK",
             "bookmaker": bookmaker,
-            "matches": result,
+            "matches": result_matches,
             "proxy_used": proxy,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
@@ -341,7 +364,7 @@ def run_scraper_task(self, scraper_module: str, scraper_class: str, proxy_pool: 
             delay = max(1, int((2 ** attempt) + random.uniform(0, jitter)))
             raise self.retry(exc=exc, countdown=delay)
 
-        # Final attempt → fallback chain
+        # Final attempt → fallback chain (only if scraper opts in)
         module = importlib.import_module(scraper_module)
         cls = getattr(module, scraper_class)
         if getattr(cls, "supports_browser_fallback", True):
@@ -367,3 +390,11 @@ def run_scraper_task(self, scraper_module: str, scraper_class: str, proxy_pool: 
             "proxy_used": proxy,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
+
+    finally:
+        # Restore env for next task
+        if mode is not None:
+            if prior_mode_env is None:
+                os.environ.pop("BETIKA_MODE", None)
+            else:
+                os.environ["BETIKA_MODE"] = prior_mode_env
