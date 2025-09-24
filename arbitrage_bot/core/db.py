@@ -556,6 +556,61 @@ def bulk_execute(sql: str, params: List[Tuple[Any, ...]], commit: bool = True) -
     with get_cursor(commit=commit) as cur:
         cur.executemany(sql, params)
 
+def add_team_alias(alias: str, canonical: str) -> bool:
+    """
+    Map a spelling/variant (alias) to a canonical team name.
+    Returns True if a new alias row was inserted.
+    Safe to call repeatedly.
+    """
+    alias = (alias or "").strip()
+    canonical = (canonical or "").strip()
+    if not alias or not canonical:
+        return False
+
+    ph = _ph()
+    with get_cursor() as cur:
+        # Ensure canonical team exists
+        if _is_sqlite():
+            cur.execute(f"INSERT OR IGNORE INTO teams(name) VALUES({ph})", (canonical,))
+        else:
+            cur.execute(f"INSERT IGNORE INTO teams(name) VALUES({ph})", (canonical,))
+
+        # Fetch canonical id
+        cur.execute(f"SELECT id FROM teams WHERE name={ph}", (canonical,))
+        row = cur.fetchone()
+        team_id = row["id"] if isinstance(row, dict) or isinstance(row, sqlite3.Row) else (row[0] if row else None)
+        if not team_id:
+            return False
+
+        # Insert alias → canonical mapping
+        if _is_sqlite():
+            cur.execute(
+                f"INSERT OR IGNORE INTO team_aliases(team_id, alias) VALUES({ph}, {ph})",
+                (team_id, alias),
+            )
+        else:
+            cur.execute(
+                f"INSERT IGNORE INTO team_aliases(team_id, alias) VALUES({ph}, {ph})",
+                (team_id, alias),
+            )
+
+        return cur.rowcount > 0
+
+
+def seed_team_aliases(pairs: list[tuple[str, str]]) -> int:
+    """
+    Bulk load aliases: [(alias, canonical), ...]
+    Returns the count of newly inserted aliases.
+    """
+    inserted = 0
+    for alias, canonical in pairs or []:
+        try:
+            if add_team_alias(alias, canonical):
+                inserted += 1
+        except Exception:
+            # keep going on bad rows
+            pass
+    return inserted
 
 if __name__ == "__main__":
     init_db()

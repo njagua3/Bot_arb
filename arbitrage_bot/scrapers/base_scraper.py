@@ -10,13 +10,17 @@ from bs4 import BeautifulSoup
 
 from utils.match_utils import build_match_dict
 from .proxy_pool import ProxyPool
-from core.db import resolve_market_id, resolve_bookmaker_id
+from core.db import upsert_market, resolve_bookmaker_id  # DB helpers
 
+# -----------------------------------------------------------------------------
+# Logger (guard against duplicate handlers on reload)
+# -----------------------------------------------------------------------------
 logger = logging.getLogger("scraper")
-logger.setLevel(logging.INFO)
-_handler = logging.StreamHandler()
-_handler.setFormatter(logging.Formatter("%(message)s"))
-logger.addHandler(_handler)
+if not logger.handlers:
+    logger.setLevel(logging.INFO)
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(_handler)
 
 
 # --- Browser fingerprint profiles ---
@@ -65,12 +69,44 @@ class BaseScraper:
             "matches_collected": 0,
         }
 
+        # Lazy DB identifiers (cached)
+        self._bookmaker_id: Optional[int] = None
+
     # -----------------------------
     # Logging
     # -----------------------------
     def log(self, event: str, level: str = "info", **kwargs):
         message = json.dumps({"event": event, "bookmaker": self.bookmaker, **kwargs})
         getattr(logger, level, logger.info)(message)
+
+    # -----------------------------
+    # DB helpers for subclasses
+    # -----------------------------
+    @property
+    def bookmaker_id(self) -> int:
+        """
+        Resolve & cache this scraper's bookmaker_id (by name + base_url).
+        """
+        if self._bookmaker_id is None:
+            try:
+                self._bookmaker_id = int(resolve_bookmaker_id(self.bookmaker, self.base_url))
+            except Exception as e:
+                self.log("resolve_bookmaker_failed", level="error", error=str(e))
+                # Fall back to a synthetic id (0). Prefer to surface errors instead.
+                self._bookmaker_id = 0
+        return self._bookmaker_id
+
+    def ensure_market(self, arb_event_id: int, market_name: str, line: Optional[str] = None) -> Optional[int]:
+        """
+        Create-or-get market.id for (arb_event_id, market_name, line).
+        Subscrapers can call this right after upserting the event.
+        """
+        try:
+            return int(upsert_market(arb_event_id, market_name, line))
+        except Exception as e:
+            self.log("upsert_market_failed", level="error",
+                     arb_event_id=arb_event_id, market_name=market_name, line=line, error=str(e))
+            return None
 
     # -----------------------------
     # User-Agent rotation
@@ -92,6 +128,7 @@ class BaseScraper:
             return None
         value, ts = entry
         if time.time() - ts < self.cache_ttl:
+            # touch
             self.cache[key] = (value, time.time())
             return value
         self.cache.pop(key, None)
@@ -110,8 +147,9 @@ class BaseScraper:
 
             for attempt in range(1, self.max_retries + 1):
                 ua = self.get_random_user_agent()
-                headers = kwargs.pop("headers", None) or {}
-                headers = {"User-Agent": ua, **headers}
+                # Copy headers per attempt so callers can pass headers without mutation
+                headers = dict(kwargs.get("headers") or {})
+                headers.setdefault("User-Agent", ua)
                 kwargs["headers"] = headers
 
                 try:
@@ -132,7 +170,7 @@ class BaseScraper:
                             url_or_endpoint=args[0] if args else None,
                             attempt=attempt,
                             duration_ms=int(duration * 1000),
-                            proxy=proxy["http"] if proxy else None,
+                            proxy=(proxy or {}).get("http"),
                         )
                         return result
 
@@ -149,7 +187,7 @@ class BaseScraper:
                         level="warning",
                         attempt=attempt,
                         error=str(e),
-                        proxy=proxy["http"] if proxy else None,
+                        proxy=(proxy or {}).get("http"),
                     )
 
                     sleep_for = (2 ** (attempt - 1)) + random.uniform(0, 0.75)
@@ -258,7 +296,7 @@ class BaseScraper:
                 self.session.cookies.set(c["name"], c["value"], domain=c.get("domain"))
 
             html = driver.page_source
-            self.log("browser_success", url=url, proxy=proxies["http"] if proxies else None)
+            self.log("browser_success", url=url, proxy=(proxies or {}).get("http"))
             return html
 
         except Exception as e:

@@ -6451,3 +6451,160 @@
 [2025-09-23 00:08:56] [INFO] 📩 Telegram alert sent to 8161806714.
 [2025-09-23 00:08:56] [INFO] 📩 Telegram alert sent to 8161806714.
 [2025-09-23 00:08:56] [SUCCESS] arbitrage.scan_and_alert_db: sent 10 alert(s).
+[2025-09-23 09:58:24] [INFO] 🤖 Telegram Bot running with 1 authorized users.
+[2025-09-23 09:58:52] [INFO] Stake updated to 10000.0 by user 8161806714
+[2025-09-23 10:09:21] [INFO] 🤖 Telegram Bot running with 1 authorized users.
+[2025-09-23 10:11:46] [INFO] 🤖 Telegram Bot running with 1 authorized users.
+[2025-09-23 10:17:10] [INFO] 🤖 Telegram Bot running with 1 authorized users.
+[2025-09-23 10:18:02] [INFO] 🤖 Telegram Bot running with 1 authorized users.
+[2025-09-23 19:40:17] [INFO] 🤖 Telegram Bot running with 1 authorized users.
+[2025-09-23 19:57:16] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 19:57:17] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 19:57:18] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 19:57:19] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 19:57:20] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 19:57:21] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 19:57:22] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 19:57:23] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 19:57:25] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 19:57:26] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 19:57:26] [SUCCESS] arbitrage.scan_and_alert_db: sent 10 alert(s).
+[2025-09-23 20:32:27] [INFO] 🚀 Arbitrage Bot up.
+   sport=Soccer (id=1)
+   hours=48, markets=['1X2', 'Match Winner', 'Over/Under', 'Both Teams To Score', 'Double Chance'], per-scan limit=10
+   loop=True, interval=180s, scrape_each_cycle=True
+[2025-09-23 20:32:27] [INFO] 🤖 Starting Telegram bot…
+[2025-09-23 20:32:27] [INFO] 🤖 Telegram Bot running with 1 authorized users.
+[2025-09-23 20:33:09] [SUCCESS] ✅ Orchestrator executed. Entries: 0
+[2025-09-23 20:33:09] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:33:10] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:33:11] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:33:12] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:33:13] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:33:13] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:33:14] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:33:15] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:33:16] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:33:17] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:33:17] [SUCCESS] arbitrage.scan_and_alert_db: sent 10 alert(s).
+[2025-09-23 20:33:17] [SUCCESS] ✅ Scan cycle done. Sent 10 (total 10).
+[2025-09-23 20:34:18] [INFO] 🤖 Telegram Bot running with 1 authorized users.
+[2025-09-23 20:34:19] [INFO] 👋 Received signal 2; will stop after this cycle.
+[2025-09-23 20:34:20] [INFO] 👋 Stopped. Bye!
+[2025-09-23 20:34:44] [INFO] 🚀 Arbitrage Bot up.
+   sport=Soccer (id=1)
+   hours=48, markets=['1X2', 'Match Winner', 'Over/Under', 'Both Teams To Score', 'Double Chance'], per-scan limit=10
+   loop=True, interval=180s, scrape_each_cycle=True
+[2025-09-23 20:34:44] [INFO] 🤖 Starting Telegram bot…
+[2025-09-23 20:34:44] [INFO] 🤖 Telegram Bot running with 1 authorized users.
+[2025-09-23 20:35:25] [SUCCESS] ✅ Orchestrator executed. Entries: 0
+[2025-09-23 20:35:26] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:35:27] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:35:28] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:35:28] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:35:29] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:35:30] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:35:31] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:35:32] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:35:33] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:35:34] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:35:34] [SUCCESS] arbitrage.scan_and_alert_db: sent 10 alert(s).
+[2025-09-23 20:35:34] [SUCCESS] ✅ Scan cycle done. Sent 10 (total 10).
+[2025-09-23 20:38:25] [SUCCESS] ✅ Orchestrator executed. Entries: 0
+[2025-09-23 20:38:25] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:38:25] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:38:25] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:38:25] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:38:25] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:38:25] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:38:26] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:38:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:38:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:38:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:38:27] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:38:28] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:38:29] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:38:30] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:38:31] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:38:32] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:38:33] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:38:34] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:38:37] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:38:37] [SUCCESS] arbitrage.scan_and_alert_db: sent 10 alert(s).
+[2025-09-23 20:38:37] [SUCCESS] ✅ Scan cycle done. Sent 10 (total 20).
+[2025-09-23 20:41:25] [SUCCESS] ✅ Orchestrator executed. Entries: 0
+[2025-09-23 20:41:25] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:41:25] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:41:25] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:41:25] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:41:25] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:41:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:41:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:41:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:41:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:41:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:41:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:41:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:41:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:41:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:41:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:41:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:41:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:41:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:41:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:41:28] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:41:29] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:41:30] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:41:31] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:41:32] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:41:32] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:41:33] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:41:34] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:41:35] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:41:36] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:41:36] [SUCCESS] arbitrage.scan_and_alert_db: sent 10 alert(s).
+[2025-09-23 20:41:36] [SUCCESS] ✅ Scan cycle done. Sent 10 (total 30).
+[2025-09-23 20:44:14] [INFO] 👋 Received signal 2; will stop after this cycle.
+[2025-09-23 20:44:26] [SUCCESS] ✅ Orchestrator executed. Entries: 0
+[2025-09-23 20:44:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:44:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:44:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:44:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:44:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:44:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:44:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:44:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:44:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:44:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:44:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:44:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:44:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:44:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:44:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:44:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:44:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:44:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:44:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:44:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:44:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:44:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:44:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:44:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:44:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:44:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:44:26] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:44:27] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:44:27] [INFO] ⏭️ Skipping duplicate opportunity alert.
+[2025-09-23 20:44:27] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:44:29] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:44:31] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:44:32] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:44:33] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:44:33] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:44:34] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:44:35] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:44:35] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:44:36] [INFO] 📩 Telegram alert sent to 8161806714.
+[2025-09-23 20:44:36] [SUCCESS] arbitrage.scan_and_alert_db: sent 10 alert(s).
+[2025-09-23 20:44:36] [SUCCESS] ✅ Scan cycle done. Sent 10 (total 40).
+[2025-09-23 20:44:36] [INFO] 👋 Stopped. Bye!

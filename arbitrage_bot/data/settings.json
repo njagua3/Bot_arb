@@ -1,5 +1,5 @@
 {
-  "stake": 20000.0,
+  "stake": 10000.0,
   "min_profit_percent": 3.0,
   "min_profit_absolute": 300.0,
   "cache_expiry_minutes": 5,

@@ -7,6 +7,7 @@ from core.settings import load_settings
 from core.logger import log_info, log_success, log_warning, log_error
 from core.telegram import send_opportunity
 from core.opps import persist_opportunity, legs_signature_for_telegram
+from core.db import resolve_sport_id
 
 
 def _event_fp(opp: Opportunity) -> str:
@@ -23,21 +24,39 @@ def _event_fp(opp: Opportunity) -> str:
     return f"{opp.arb_event_id}:{ko.strftime('%Y%m%dT%H%M%SZ')}"
 
 
+def _resolve_sport_id(sport_id: Optional[int], sport_name: Optional[str]) -> int:
+    """
+    Prefer explicit sport_id. Otherwise resolve from name.
+    Defaults to canonical 'Soccer'.
+    """
+    if isinstance(sport_id, int) and sport_id > 0:
+        return sport_id
+    if sport_name:
+        return resolve_sport_id(sport_name)
+    return resolve_sport_id("Soccer")
+
+
 def scan_and_alert_db(
-    sport_id: int = 14,
+    sport_id: Optional[int] = None,
     hours: int = 48,
     market_names: Optional[List[str]] = None,
     max_send: int = 20,
+    sport_name: Optional[str] = None,
 ) -> int:
     """
     DB-backed scan: compute opportunities, persist new legs-combos,
     send alerts for NEW ONLY (unique by legs signature).
+    - sport_id: your internal DB id (preferred if known).
+    - sport_name: canonical name in your sports table (e.g., "Soccer").
     """
     _ = load_settings()  # thresholds & stake used inside run_calc_window
 
+    # Canonicalize sport
+    resolved_sport_id = _resolve_sport_id(sport_id, sport_name)
+
     try:
         opps = run_calc_window(
-            sport_id=sport_id,
+            sport_id=resolved_sport_id,
             hours=hours,
             market_names=market_names or ["1X2"],
         )
@@ -56,7 +75,7 @@ def scan_and_alert_db(
             fp = _event_fp(opp)
             row_id = persist_opportunity(
                 arb_event_id=opp.arb_event_id,
-                sport_id=sport_id,
+                sport_id=resolved_sport_id,
                 event_fingerprint=fp,
                 market_key=str(opp.market_name),  # keep consistent with markets.name
                 line=str(opp.line) if opp.line is not None else None,
@@ -92,7 +111,8 @@ if __name__ == "__main__":
     import argparse
 
     ap = argparse.ArgumentParser(description="Scan DB for arbs and send Telegram alerts")
-    ap.add_argument("--sport", type=int, default=14, help="Sport ID (14 = Soccer)")
+    ap.add_argument("--sport", type=int, default=None, help="Internal sport_id (our DB id). If omitted, resolves from --sport-name or defaults to 'Soccer'.")
+    ap.add_argument("--sport-name", type=str, default=None, help='Canonical sport name (e.g., "Soccer"). Used if --sport is not provided.')
     ap.add_argument("--hours", type=int, default=48, help="Look-ahead window")
     ap.add_argument("--markets", nargs="*", help="DB market labels, e.g., 1X2 'Over/Under 2.5'")
     ap.add_argument("--limit", type=int, default=10, help="Max alerts to send")
@@ -100,6 +120,7 @@ if __name__ == "__main__":
 
     scan_and_alert_db(
         sport_id=args.sport,
+        sport_name=args.sport_name,
         hours=args.hours,
         market_names=args.markets,
         max_send=args.limit,

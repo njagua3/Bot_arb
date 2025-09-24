@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from telegram.ext import Updater, CommandHandler, CallbackContext
-from telegram import Update
+from telegram import Update, ParseMode
 
 from core.config import ENVCFG
 from core.settings import load_settings, save_settings, get_scan_interval
@@ -200,6 +200,7 @@ def _format_best_odds_1x2(opp) -> List[str]:
         lines.append(f"{key.upper()} ➤ {val:.2f} ({_esc(bm_name)})")
     return lines
 
+
 # ===============================
 # Pretty formatter (trader style)
 # ===============================
@@ -325,24 +326,54 @@ def stake(update: Update, context: CallbackContext):
         s = load_settings()
         s.stake = new_stake
         save_settings(s)
-        update.message.reply_text(f"✅ Stake updated to {int(new_stake)} KES.")
+        update.message.reply_text(f"✅ Stake updated to {int(new_stake):,} KES.")
         logger.info(f"Stake updated to {new_stake} by user {update.effective_chat.id}")
     except Exception:
         update.message.reply_text("❗ Usage: /stake 15000")
 
 def start(update: Update, context: CallbackContext):
     s = load_settings()
+    stake_value = getattr(s, "stake", 0)
+    affiliate_url = getattr(s, "affiliate_url", None)  # optional
+
+    text = (
+        "🤖 Hello! Welcome to ArbXtreme Bot 🎉\n\n"
+        f"Your current stake is: <b>{stake_value:,.0f} KES</b>.\n"
+        "(This is the total amount the bot will automatically split among all outcomes.)\n\n"
+        "💰 Use /stake &lt;amount&gt; to change your stake.\n"
+        "📖 Type /help to see all available commands.\n\n"
+        "⚽ Before you start, make sure you’re signed up with these bookmakers:\n\n"
+        "• ke.sportpesa.com\n"
+        "• Betika.com\n"
+        "• Hakibets.com\n"
+        "• Cloudbet.com\n"
+        "• Odibets.com\n"
+        "• sportybet.com/ke\n"
+        "• Kwikbet.co.ke\n"
+        "• Mozzartbet.co.ke\n"
+        "• Shabiki.com\n"
+        "• Bangbet.com\n\n"
+        "💡 <b>Pro Tip:</b> To avoid account closure by bookmakers, always round off your bets.\n\n"
+        "🔗 <b>Affiliate Program:</b>\n"
+        "Join our affiliate program and earn a 10% referral bonus!\n"
+    )
+    if affiliate_url:
+        text += f"👉 <a href=\"{html.escape(affiliate_url, quote=True)}\">Click here to join</a>\n\n"
+    else:
+        text += "👉 Ask for our affiliate link to join.\n\n"
+
+    text += "Good luck and profit smart! 🚀"
+
     update.message.reply_text(
-        "🤖 Hello! Welcome to ArbXtreme Bot.\n"
-        f"Stake: {int(s.stake)} KES.\n"
-        "Use /stake <amount> to change it.\n"
-        "Type /help to see all available commands."
+        text,
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
     )
 
 def help_command(update: Update, context: CallbackContext):
     update.message.reply_text(
         "📖 Commands:\n"
-        "/start – Welcome + current stake\n"
+        "/start – Welcome + current stake & setup tips\n"
         "/stake <amount> – Update stake (authorized only)\n"
         "/status – Show bot status (authorized only)\n"
         "/help – Show this help message"
@@ -359,7 +390,7 @@ def status_command(update: Update, context: CallbackContext):
         scan_interval = s.scan_interval
     update.message.reply_text(
         "📊 Bot Status:\n"
-        f"• Stake: {int(s.stake)} KES\n"
+        f"• Stake: {int(s.stake):,} KES\n"
         f"• Scan interval: {scan_interval} seconds\n"
         f"• Authorized users: {len(CHAT_IDS)}"
     )
@@ -371,8 +402,8 @@ def send_welcome_test() -> None:
     s = load_settings()
     msg = (
         "🤖 <b>Njagua Arb Bot</b> — Telegram link OK!\n"
-        f"Stake: <b>{int(s.stake)}</b> KES\n"
-        "Commands: /start, /status, /stake <amount>\n"
+        f"Stake: <b>{int(s.stake):,}</b> KES\n"
+        "Commands: /start, /status, /stake &lt;amount&gt;\n"
         "This is a test broadcast to verify delivery."
     )
     send_telegram_alert(msg)

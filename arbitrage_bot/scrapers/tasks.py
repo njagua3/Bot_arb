@@ -1,3 +1,5 @@
+# scrapers_tasks_fixed.py
+
 import asyncio
 import importlib
 import inspect
@@ -307,22 +309,49 @@ def run_scraper_task(
         # --- Execute scraper ---
         result_matches: List[Dict[str, Any]] = []
 
+        async def _with_lifecycle(coro):
+            """
+            Ensure AsyncBaseScraper lifecycle is honored for async calls:
+            - await scraper.__aenter__() to create httpx client / browser
+            - finally await scraper.cleanup()
+            """
+            if hasattr(scraper, "__aenter__"):
+                try:
+                    enter = scraper.__aenter__
+                    if inspect.iscoroutinefunction(enter):
+                        await enter()
+                    else:
+                        enter()
+                    return await coro
+                finally:
+                    if hasattr(scraper, "cleanup"):
+                        try:
+                            if inspect.iscoroutinefunction(scraper.cleanup):
+                                await scraper.cleanup()
+                            else:
+                                scraper.cleanup()
+                        except Exception:
+                            pass
+            return await coro
+
         if hasattr(scraper, "run"):
-            # Scrapers that manage DB writes themselves
             if inspect.iscoroutinefunction(scraper.run):
-                safe_async_run(scraper.run())
+                safe_async_run(_with_lifecycle(scraper.run()))
             else:
                 scraper.run()
-            # Keep return contract stable for orchestrator
             result_matches = []
+
         else:
-            # Scrapers that return a list
             if hasattr(scraper, "get_multiple_odds"):
-                data = safe_async_run(scraper.get_multiple_odds()) if getattr(scraper, "is_async", False) \
-                    else scraper.get_multiple_odds()
+                if getattr(scraper, "is_async", False) or inspect.iscoroutinefunction(scraper.get_multiple_odds):
+                    data = safe_async_run(_with_lifecycle(scraper.get_multiple_odds()))
+                else:
+                    data = scraper.get_multiple_odds()
             else:
-                data = safe_async_run(scraper.get_odds()) if getattr(scraper, "is_async", False) \
-                    else scraper.get_odds()
+                if getattr(scraper, "is_async", False) or inspect.iscoroutinefunction(scraper.get_odds):
+                    data = safe_async_run(_with_lifecycle(scraper.get_odds()))
+                else:
+                    data = scraper.get_odds()
 
             if not isinstance(data, list):
                 raise ValueError("Invalid scraper result (expected list)")
@@ -335,7 +364,6 @@ def run_scraper_task(
         if not result_matches:
             logger.warning(json.dumps({"event": "zero_matches", "bookmaker": bookmaker}))
 
-        # --- Push detailed scraper metrics if available ---
         try:
             if hasattr(scraper, "metrics_snapshot"):
                 metrics = scraper.metrics_snapshot()
@@ -359,12 +387,10 @@ def run_scraper_task(
         if proxy:
             blacklist_proxy(proxy)
 
-        # Retry with exponential backoff
         if attempt < max_retries:
             delay = max(1, int((2 ** attempt) + random.uniform(0, jitter)))
             raise self.retry(exc=exc, countdown=delay)
 
-        # Final attempt → fallback chain (only if scraper opts in)
         module = importlib.import_module(scraper_module)
         cls = getattr(module, scraper_class)
         if getattr(cls, "supports_browser_fallback", True):
@@ -392,7 +418,6 @@ def run_scraper_task(
         }
 
     finally:
-        # Restore env for next task
         if mode is not None:
             if prior_mode_env is None:
                 os.environ.pop("BETIKA_MODE", None)
